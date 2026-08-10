@@ -1,0 +1,9 @@
+*.html
+.DS_Store
+__pycache__/
+*.pyc
+
+# Dumped layouts are an inventory of the apps installed on one machine.
+# layouts/example.json is the committed sample; real dumps stay local.
+layouts/*.json
+!layouts/example.json

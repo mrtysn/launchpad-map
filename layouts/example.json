@@ -1,0 +1,15 @@
+{
+  "title": "Example",
+  "pages": [
+    [
+      { "folder": "Media", "apps": ["VLC", "GIMP", "Blender", "Audacity"] },
+      { "folder": "Dev", "apps": ["Xcode", "Docker", "DBeaver"] },
+      "Safari",
+      "Terminal",
+      "System Settings"
+    ],
+    [
+      { "folder": "Apple", "apps": ["Chess", "Stickies", "Grapher"] }
+    ]
+  ]
+}

@@ -1,0 +1,60 @@
+#!/bin/zsh
+# DESC: Dump the macOS Launchpad layout to JSON and render it as an HTML mock-up
+set -euo pipefail
+
+REPO="${0:A:h:h}"
+LIB="$REPO/lib"
+
+usage() {
+  cat <<'EOF'
+launchpad-map — inspect and visualise the macOS Launchpad layout
+
+USAGE
+  launchpad-map dump   [--out FILE] [--title TEXT] [--db PATH]
+  launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
+  launchpad-map open   [--layout FILE]...
+  launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
+  launchpad-map --help
+
+COMMANDS
+  dump     Read the live Launchpad database and print a layout JSON document.
+           The format is hand-editable: apps are named by their Launchpad
+           title, folders are {"folder": "Name", "apps": [...]}.
+
+  render   Turn one or more layout JSON files into a single self-contained
+           HTML page that looks like Launchpad. Icons are embedded as data
+           URIs, so the file works offline. Pass --layout twice to get tabs
+           for comparing a current layout against a proposed one. With no
+           --layout, the live database is rendered.
+
+  open     Render to a temporary file and open it in the default browser.
+
+  write    Apply a layout to the live Launchpad database. Backs the database
+           up first, applies everything in one transaction, then restarts the
+           Dock. Use --dry-run to see the report without writing.
+
+EXAMPLES
+  launchpad-map dump --out layouts/current.json
+  launchpad-map render --layout layouts/current.json \
+                       --layout layouts/proposed.json --out /tmp/lp.html
+  launchpad-map open
+  launchpad-map write layouts/proposed.json --dry-run
+
+NOTES
+  Every command except `write` is read-only.
+EOF
+}
+
+case "${1-}" in
+  dump)   shift; exec python3 "$LIB/dump.py" "$@" ;;
+  render) shift; exec python3 "$LIB/render.py" "$@" ;;
+  write)  shift; exec python3 "$LIB/write.py" "$@" ;;
+  open)
+    shift
+    out="$(mktemp -t launchpad-map).html"
+    python3 "$LIB/render.py" --out "$out" "$@"
+    exec open "$out"
+    ;;
+  -h|--help|help|"") usage ;;
+  *) print -u2 "launchpad-map: unknown command '${1}'"; usage; exit 64 ;;
+esac

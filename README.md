@@ -1,0 +1,99 @@
+# launchpad-map
+
+Read the macOS Launchpad layout out of its SQLite database and render it as a
+self-contained HTML mock-up — real icons, real folders, real page breaks — so you
+can see what a reorganisation would look like before dragging 200 icons around.
+
+It can also apply a layout, which is the part worth being careful about — see
+[Writing a layout](#writing-a-layout).
+
+```
+launchpad-map open                          # render the live layout and open it
+launchpad-map dump --out layouts/current.json
+launchpad-map render --layout layouts/current.json \
+                     --layout layouts/proposed.json \
+                     --out ~/Desktop/launchpad.html
+launchpad-map write layouts/proposed.json --dry-run
+```
+
+Passing `--layout` more than once produces a tabbed page, which is the point:
+edit a copy of your dump by hand, render both, and flip between them.
+
+## The layout format
+
+`dump` emits a document that is meant to be edited by hand. Apps are named by
+their Launchpad title; folders are objects. Bundle identifiers are resolved from
+the live database at render time, so a layout you write yourself never has to
+carry them.
+
+```json
+{
+  "title": "Proposed",
+  "pages": [
+    [
+      { "folder": "Media", "apps": ["VLC", "GIMP", "Blender"] },
+      "Google Chrome",
+      "iTerm"
+    ]
+  ]
+}
+```
+
+Each list under `pages` is one home screen. A folder's `apps` list is chunked
+into folder pages automatically, and any folder that needs more than one page is
+flagged in red in the output — the whole reason this exists.
+
+## What it shows
+
+- Every home page and every folder, with the icons macOS actually uses
+- Folder tiles you can click to see the contents, Launchpad-style
+- App counts per folder, and a warning on anything that spills past one page
+- A page holds 7×5 = 35 icons; override with `--page-size` if your grid differs
+
+## Writing a layout
+
+`launchpad-map write layout.json` backs the database up, applies the layout in
+one transaction, restarts the Dock, and then **re-reads the database to check
+the Dock actually kept what was written** — rolling back automatically if it did
+not. `--dry-run` reports every move and writes nothing.
+
+Three things about this database will eat a layout if you do not know them, and
+all three are handled here:
+
+**The first root page is `HOLDINGPAGE`.** It sits at ordering 0, is never
+displayed, and is Launchpad's inbox for newly installed apps. Its contents are
+flushed onto the real pages at startup — so a layout written into it is torn
+apart the moment the Dock restarts, leaving folders behind as empty shells. Real
+pages start at ordering 1.
+
+**The Dock saves its in-memory layout when asked to quit.** `killall Dock` sends
+SIGTERM, and the departing Dock writes its pre-write copy of the layout straight
+over the file you just changed. Use SIGKILL. This applies just as much to
+restoring a backup as to writing a new layout.
+
+**Recent changes live in the write-ahead log, not the database file.** Copying
+just `db` is not a backup and restoring just `db` is not a restore — `db`,
+`db-wal` and `db-shm` travel together, or the layout silently reverts to
+whenever SQLite last checkpointed. Backups here keep all three, and the writer
+checkpoints the WAL before letting the Dock restart.
+
+Backups land in `~/Library/Application Support/launchpad-backups/` by default,
+and the path is printed on every run.
+
+## Requirements
+
+macOS with the Swift toolchain (`/usr/bin/swift`, present with the Command Line
+Tools) and Python 3. Icons come from AppKit via `NSWorkspace`, so they match the
+system exactly, including apps that only exist inside a wrapper directory.
+
+## Where the database lives
+
+`$(getconf DARWIN_USER_DIR)/../0/com.apple.dock.launchpad/db/db` — a per-user
+temporary directory, which is why the path is derived rather than written down.
+The tool copies the database (and its WAL) before reading, so it never contends
+with the Dock for a lock.
+
+## Note on Launchpad's future
+
+Launchpad is the macOS 15 and earlier app grid. macOS 26 replaces it with the
+Spotlight app view, which does not use this database.
