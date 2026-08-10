@@ -1,5 +1,5 @@
 #!/bin/zsh
-# DESC: Dump the macOS Launchpad layout to JSON and render it as an HTML mock-up
+# DESC: Inspect the macOS Launchpad layout — dump to JSON, render as HTML, or apply a new arrangement
 set -euo pipefail
 
 REPO="${0:A:h:h}"
