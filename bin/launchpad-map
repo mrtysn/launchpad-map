@@ -12,6 +12,7 @@ launchpad-map — inspect and visualise the macOS Launchpad layout
 USAGE
   launchpad-map dump   [--out FILE] [--title TEXT] [--date YYYY-MM-DD] [--db PATH] [--save]
   launchpad-map history [--out FILE] [--open]
+  launchpad-map showcase [--out FILE] [--open]
   launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
@@ -35,6 +36,10 @@ COMMANDS
            to launchpad-history.html in the repo. `dump --save` adds a
            snapshot by hand; `write` adds one for each layout it applies.
 
+  showcase Render the newest snapshot with only the apps showcase.json
+           approves, to showcase.html in the repo. Apps it does not list are
+           hidden until reviewed; the history view counts them.
+
   write    Apply a layout to the live Launchpad database. Backs the database
            up first, applies everything in one transaction, then restarts the
            Dock. Adds a snapshot to the history. Use
@@ -57,6 +62,7 @@ case "${1-}" in
   render) shift; exec python3 "$LIB/render.py" "$@" ;;
   write)  shift; exec python3 "$LIB/write.py" "$@" ;;
   history) shift; exec python3 "$LIB/history.py" "$@" ;;
+  showcase) exec python3 "$LIB/history.py" "$@" ;;
   open)
     shift
     out="$(mktemp -t launchpad-map).html"

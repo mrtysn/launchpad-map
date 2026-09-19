@@ -101,6 +101,33 @@ def normalize(doc: dict, page_size: int) -> dict:
     }
 
 
+def load_review(path):
+    """The showcase approvals: {app title: {"show": bool, ...}}."""
+    if not path or not os.path.exists(path):
+        return None
+    with open(path) as fh:
+        return json.load(fh).get("apps", {})
+
+
+def showcase_only(doc: dict, review: dict) -> dict:
+    """Keep only approved apps. An app missing from the review stays hidden."""
+    shown = lambda a: review.get(a, {}).get("show") is True
+    pages = []
+    for page in doc.get("pages", []):
+        kept = []
+        for entry in page:
+            if isinstance(entry, str):
+                if shown(entry):
+                    kept.append(entry)
+            elif "folder" in entry:
+                apps = [a for a in entry.get("apps", []) if shown(a)]
+                if apps:
+                    kept.append({"folder": entry["folder"], "apps": apps})
+        if kept:
+            pages.append(kept)
+    return {"title": doc.get("title"), "date": doc.get("date"), "time": doc.get("time"), "pages": pages}
+
+
 def collect_titles(layouts) -> set:
     titles = set()
     for layout in layouts:
@@ -217,6 +244,8 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .chip[hidden] { display: none; }
 .chip.moved i { background: var(--moved); } .chip.new i { background: var(--new); }
 .chip.gone i { background: var(--gone); }
+.chip.unreviewed i { background: var(--dim); }
+.compare[hidden] { display: none; }
 
 /* Every page on screen at once, left to right, as Launchpad orders them. */
 #pages { display: flex; gap: 20px; overflow-x: auto; margin-top: 30px; padding-bottom: 8px; }
@@ -316,7 +345,9 @@ function el(tag, cls, text) {
 }
 function when(s) { return s.date ? fmtDate(s.date) + (s.time ? ', ' + s.time : '') : ''; }
 // Snapshots are named by when they were taken; a draft is the one proposal.
-function label(s) { return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
+// An app the showcase approvals do not mention yet; hidden from the showcase.
+function unreviewed(app) { return !!D.review && !(app in D.review); }
+function label(s) { if (D.public) return 'Launchpad'; return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
 function fmtDate(d) {
   if (!d) return '';
   const t = new Date(d + 'T12:00:00');
@@ -419,6 +450,7 @@ function gone() {
 function matches(app) {
   const st = status(app);
   let ok = !filter || (st && st.k === filter);
+  if (filter === 'unreviewed') ok = unreviewed(app);
   if (filter === 'dissolved') {
     const b = locs(S[base]).get(app);
     ok = !!(b && b.folder && folderChanges().dissolved.includes(b.folder));
@@ -511,6 +543,7 @@ function openFolder(f) {
 
 function drawRail() {
   const ol = $('.rail ol');
+  if (!ol) return;  // a single layout has no timeline
   ol.replaceChildren();
   for (let i = S.length - 1; i >= 0; i--) {
     const s = S[i], li = el('li'), b = el('button', 'snap' + (s.draft ? ' draft' : '') + (i === base ? ' base' : ''));
@@ -556,7 +589,8 @@ function drawHead() {
   const fc = folderChanges();
   const counts = { moved: all.filter(x => x.k === 'moved').length, folders: movedFolders,
     renamed: fc.renamed.length, merged: fc.merged.length, created: fc.created.length,
-    dissolved: fc.dissolved.length, new: all.filter(x => x.k === 'new').length, gone: gone().length };
+    dissolved: fc.dissolved.length, new: all.filter(x => x.k === 'new').length, gone: gone().length,
+    unreviewed: [...locs(s).keys()].filter(unreviewed).length };
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
   const text = {
     moved: n => plural(n, 'app moved', 'apps moved'),
@@ -565,7 +599,7 @@ function drawHead() {
     merged: n => plural(n, 'folder merged', 'folders merged'),
     created: n => plural(n, 'new folder', 'new folders'),
     dissolved: n => plural(n, 'folder broken up', 'folders broken up'),
-    new: n => n + ' new', gone: n => n + ' uninstalled',
+    new: n => n + ' new', gone: n => n + ' uninstalled', unreviewed: n => n + ' not reviewed',
   };
   const tips = {
     renamed: fc.renamed.map(([b, c]) => b + ' to ' + c).join(', '),
@@ -578,7 +612,7 @@ function drawHead() {
     c.lastChild.textContent = text[k](counts[k]);
     c.title = tips[k] || '';
     c.setAttribute('aria-pressed', String(filter === k));
-    c.hidden = base < 0 || !counts[k];
+    c.hidden = !counts[k] || (base < 0 && k !== 'unreviewed');
   });
 }
 
@@ -654,7 +688,8 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown' && cur > 0) { e.preventDefault(); select(cur - 1); }
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
 });
-if (S.length < 2) { document.querySelector('.rail').remove(); document.body.style.gridTemplateColumns = '1fr'; $('.compare').hidden = true; }
+if (S.length < 2) { document.querySelector('.rail').remove(); document.body.style.gridTemplateColumns = '1fr'; }
+if (D.public || !D.review && S.length < 2) $('.compare').hidden = true;
 // The header grows with the note and the folder summary. Reserve the tallest
 // one any snapshot needs, so the pages stay put while stepping through them.
 function holdHead() {
@@ -677,18 +712,23 @@ addEventListener('resize', () => { clearTimeout(_rz); _rz = setTimeout(holdHead,
 """
 
 
-def render(layouts, icons, ids, page_size) -> str:
+def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
     """Render the snapshots, oldest first, as one page with a history rail."""
     by_title = {t: icons[ids[t]] for t in collect_titles(layouts) if ids.get(t) in icons}
     data = {
         "pageSize": page_size,
+        "public": public,
+        # Only the approved/hidden flags reach the page; reasons stay local.
+        # The public page gets no approvals at all: they name the hidden apps.
+        "review": None if review is None or public
+        else {a: bool(v.get("show")) for a, v in review.items()},
         "icons": by_title,
         "snapshots": [
             {k: layout[k] for k in ("title", "date", "time", "draft", "note", "pages")} for layout in layouts
         ],
     }
     blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    heading = "Launchpad history" if len(layouts) > 1 else "Launchpad layout"
+    heading = "Launchpad" if public else "Launchpad history" if len(layouts) > 1 else "Launchpad layout"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -714,6 +754,7 @@ def render(layouts, icons, ids, page_size) -> str:
     <button class="chip gone" type="button" data-k="dissolved"><i></i><span></span></button>
     <button class="chip new" type="button" data-k="new"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="gone"><i></i><span></span></button>
+    <button class="chip unreviewed" type="button" data-k="unreviewed" title="Not in the showcase approvals yet, so hidden from the showcase"><i></i><span></span></button>
   </div>
   </header>
   <div id="pages"></div>
@@ -745,6 +786,10 @@ def main() -> int:
     ap.add_argument("--page-size", type=int, default=35, help="icons per page (default 35)")
     ap.add_argument("--icon-px", type=int, default=96, help="icon pixel size (default 96)")
     ap.add_argument("--db", help="database to read titles from (default: the live one)")
+    ap.add_argument("--review", help="showcase approvals JSON; the history view "
+                    "counts apps not reviewed yet")
+    ap.add_argument("--showcase", help="showcase approvals JSON; render the last "
+                    "layout with only the approved apps, for publishing")
     args = ap.parse_args()
 
     docs = []
@@ -764,6 +809,12 @@ def main() -> int:
 
             shutil.rmtree(tmp, ignore_errors=True)
 
+    public = bool(args.showcase)
+    review = load_review(args.showcase or args.review)
+    if public:
+        if review is None:
+            raise SystemExit(f"launchpad-map: no approvals at {args.showcase}")
+        docs = [showcase_only(docs[-1], review)]
     layouts = [normalize(d, args.page_size) for d in docs]
     ids = title_to_bundleid(args.db)
     titles = collect_titles(layouts)
@@ -773,7 +824,7 @@ def main() -> int:
     missing = sorted(t for t in titles if ids.get(t) not in icons)
 
     with open(args.out, "w") as fh:
-        fh.write(render(layouts, icons, ids, args.page_size))
+        fh.write(render(layouts, icons, ids, args.page_size, review, public))
 
     size_mb = os.path.getsize(args.out) / 1024 / 1024
     print(f"wrote {args.out} ({size_mb:.1f} MB, {len(icons)} icons)", file=sys.stderr)

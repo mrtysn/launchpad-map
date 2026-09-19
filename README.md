@@ -32,6 +32,15 @@ A proposal is a layout with `"draft": true`, plus an optional `"note"`. It is
 shown after the snapshots until `write` applies it, which removes the draft. `layouts/*.json` is gitignored: a snapshot is an
 inventory of one machine's apps.
 
+## Showcase
+
+`launchpad-map showcase` renders the newest snapshot with only the apps you have
+approved, to `showcase.html`, for publishing. Approvals live in `showcase.json`
+(gitignored; copy `showcase.example.json`). An app it does not list is hidden, so
+a new install never appears publicly until you review it; the history view
+counts those as "not reviewed". The public page carries no approvals and no
+reasons, only the apps it shows.
+
 ## The layout format
 
 `dump` emits a document that is meant to be edited by hand. Apps are named by

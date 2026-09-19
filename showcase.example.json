@@ -1,0 +1,12 @@
+{
+  "_about": "Which apps the public showcase shows. An app not listed here is hidden until reviewed. show: true publishes it; reason is a note for you and never reaches the page.",
+  "apps": {
+    "Firefox": {
+      "show": true
+    },
+    "Mullvad VPN": {
+      "show": false,
+      "reason": "VPN or network identity"
+    }
+  }
+}
