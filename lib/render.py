@@ -128,7 +128,7 @@ CSS = """
 * { box-sizing: border-box; }
 html { color-scheme: dark; }
 body {
-  margin: 0; min-height: 100vh; color: var(--ink);
+  margin: 0; height: 100vh; overflow: hidden; color: var(--ink);
   font: 13px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
   background: #141b2b radial-gradient(140% 100% at 20% -10%, #2a3a57 0%, #151c2c 55%, #10141f 100%) fixed;
   -webkit-font-smoothing: antialiased;
@@ -171,7 +171,10 @@ button, input, select { font: inherit; color: inherit; }
 .stat b { font-weight: 500; }
 .stat .up { color: var(--new); } .stat .down { color: var(--gone); }
 
-main { padding: 28px 40px 80px; min-width: 0; }
+/* Only the main column scrolls, with its scrollbar space always reserved, so a
+   snapshot tall enough to scroll never shifts the layout sideways. */
+main { padding: 28px 40px 80px; min-width: 0; height: 100vh; overflow-y: auto;
+  scrollbar-gutter: stable; }
 .top { display: flex; gap: 24px; align-items: flex-start; justify-content: space-between;
   flex-wrap: wrap; }
 h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
@@ -284,14 +287,14 @@ dialog::backdrop { background: rgba(8,10,16,.6); backdrop-filter: blur(14px); }
 @media (prefers-reduced-motion: reduce) {   .mark { animation: none; } .cell { transition: none; } }
 
 @media (max-width: 900px) {
-  body { grid-template-columns: minmax(0, 1fr); }
+  body { grid-template-columns: minmax(0, 1fr); height: auto; overflow: visible; }
   .rail { position: static; height: auto; border-left: 0; border-bottom: 1px solid var(--line);
     padding: 12px 16px; order: -1; overflow-x: auto; }
   .rail ol { display: flex; gap: 6px; }
   .rail ol::before { display: none; }
   .snap { grid-template-columns: 1fr; padding: 8px 12px; border-radius: 12px; min-width: 150px; }
   .dot { display: none; }
-  main { padding: 20px 16px 60px; }
+  main { padding: 20px 16px 60px; height: auto; overflow: visible; }
   :root { --tile: 78px; --icon: 52px; }
   .grid { grid-template-columns: repeat(auto-fill, var(--tile)); justify-content: space-between; }
 }
