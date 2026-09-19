@@ -226,7 +226,10 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .page { flex: 1 1 0; min-width: 460px; container-type: inline-size;
   border: 1px solid var(--line); border-radius: 18px; padding: 16px 16px 20px;
   background: rgba(255,255,255,.025); }
-.page .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 16px 4px; }
+.page .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px 4px;
+  /* Always the full 7x5 of a Launchpad page, every row the same height, so a
+     panel is the same size whichever snapshot is on screen. */
+  grid-template-rows: repeat(5, calc(min(var(--icon), 10.5cqi) + 56px)); }
 .page .iw { width: min(var(--icon), 10.5cqi); height: min(var(--icon), 10.5cqi); }
 .page h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600; }
 .page h2 span { font-weight: 400; color: var(--dim); margin-left: 8px; }
@@ -244,7 +247,8 @@ button.cell { appearance: none; border: 0; background: none; padding: 0; cursor:
 .label { font-size: 11.5px; line-height: 1.3; white-space: nowrap; overflow: hidden;
   text-overflow: ellipsis; max-width: 100%;
   text-shadow: 0 1px 3px rgba(0,0,0,.6); }
-.why { font-size: 10.5px; margin-top: 2px; line-height: 1.2; }
+.why, .count { max-width: 100%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.why { font-size: 10.5px; margin-top: 1px; line-height: 1.3; }
 .mark { position: absolute; top: -3px; right: -3px; width: 13px; height: 13px;
   border-radius: 50%; border: 2px solid #1a2233; }
 .moved .mark { background: var(--moved); } .moved .why { color: var(--moved); }
@@ -375,7 +379,7 @@ function folderFrom(name, page) {
   S[base].pages.forEach((p, pi) => p.forEach(x => {
     if (x.kind === 'folder' && was < 0 && olds.includes(x.title)) was = pi;
   }));
-  return was >= 0 && was !== page ? 'page ' + (was + 1) : null;
+  return was >= 0 && was !== page ? 'Page ' + (was + 1) : null;
 }
 function folderPage(f) { return S[cur].pages.findIndex(p => p.includes(f)); }
 
@@ -434,7 +438,7 @@ function appCell(t, withStatus = true) {
   if (st) w.append(el('span', 'mark'));
   const lb = el('div', 'label', t); lb.title = t;
   c.append(w, lb);
-  if (st) c.append(el('div', 'why', st.k === 'new' ? 'new' : 'from ' + st.from));
+  if (st) { const y = el('div', 'why', st.k === 'new' ? 'new' : 'from ' + st.from); y.title = y.textContent; c.append(y); }
   if (narrowing() && withStatus) c.classList.add(matches(t) ? 'hit' : 'dim');
   return c;
 }
@@ -459,7 +463,7 @@ function folderCell(f) {
   const lb = el('div', 'label', f.title); lb.title = f.title;
   b.append(w, lb,
     el('span', 'count' + (pages > 1 ? ' over' : ''), f.apps.length + (pages > 1 ? ' apps, ' + pages + ' pages' : ' apps')));
-  if (why) b.append(el('div', 'why', why));
+  if (why) { const y = el('div', 'why', why); y.title = why; b.append(y); }
   b.setAttribute('aria-label', f.title + ', folder of ' + f.apps.length + ' apps' + (why ? ', ' + why : ''));
   const self = filter === 'folders' && from && (!query || f.title.toLowerCase().includes(query));
   if (narrowing()) b.classList.add(self || f.apps.some(matches) ? 'hit' : 'dim');
