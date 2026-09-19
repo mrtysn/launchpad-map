@@ -261,7 +261,7 @@ def main() -> int:
         target = backup(path, args.backup_dir)
         print(f"backed up to {target}", file=sys.stderr)
         if not args.db and history.drifted():
-            print(f"history: {history.save_snapshot('Live layout')}", file=sys.stderr)
+            print(f"history: {history.save_snapshot()}", file=sys.stderr)
         conn, tmp = sqlite3.connect(path), None
 
     try:
@@ -366,7 +366,7 @@ def main() -> int:
 
     print(f"Dock restarted; verified {len(wanted)} folders")
     if not args.db:
-        print(f"history: {history.save_snapshot('Applied', note=note)}")
+        print(f"history: {history.save_snapshot(note=note)}")
         history.retire_draft(args.layout)
     print(f"backup kept at {target}")
     return 0

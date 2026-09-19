@@ -314,7 +314,8 @@ function el(tag, cls, text) {
   return e;
 }
 function when(s) { return s.date ? fmtDate(s.date) + (s.time ? ', ' + s.time : '') : ''; }
-function label(s) { return s.date ? s.title + ', ' + when(s) : s.title; }
+// Snapshots are named by when they were taken; a draft is the one proposal.
+function label(s) { return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
 function fmtDate(d) {
   if (!d) return '';
   const t = new Date(d + 'T12:00:00');
@@ -508,8 +509,7 @@ function drawRail() {
     b.setAttribute('aria-current', String(i === cur));
     const n = locs(s).size, folders = s.pages.flat().filter(x => x.kind === 'folder').length;
     const txt = el('span');
-    txt.append(el('span', 'when', when(s) || s.title));
-    if (s.date) txt.append(el('span', 'what', s.title));
+    txt.append(el('span', 'when', label(s)));
     const st = el('span', 'stat', n + ' apps, ' + folders + ' folders');
     if (i > 0) {
       const prev = locs(S[i - 1]), now = locs(s);
@@ -531,7 +531,7 @@ function drawRail() {
 function drawHead() {
   const s = S[cur];
   const h = $('h1');
-  h.replaceChildren(document.createTextNode(s.title + (s.draft ? ' (not applied)' : '')));
+  h.replaceChildren(document.createTextNode(label(s)));
   const n = locs(s).size, folders = s.pages.flat().filter(x => x.kind === 'folder').length;
   const loose = s.pages.flat().filter(x => x.kind === 'app').length;
   h.append(el('small', null, n + ' apps, ' + s.pages.length + (s.pages.length === 1 ? ' page, ' : ' pages, ') +
@@ -570,7 +570,7 @@ function drawPages() {
   const g = gone();
   if (g.length) {
     const sec = el('section', 'gone-row');
-    sec.append(el('h2', null, 'Uninstalled since ' + (fmtDate(S[base].date) || S[base].title)));
+    sec.append(el('h2', null, 'Uninstalled since ' + label(S[base])));
     const grid = el('div', 'grid');
     g.forEach(a => grid.append(appCell(a, false)));
     sec.append(grid); gbox.append(sec);
@@ -593,7 +593,7 @@ function drawTrail() {
   for (let i = S.length - 1; i >= 0; i--) {
     const l = locs(S[i]).get(app);
     const li = el('li', (l ? '' : 'absent') + (i === cur ? ' here' : ''));
-    li.append(el('span', null, when(S[i]) || S[i].title), el('span', null, l ? where(l) : 'not installed'));
+    li.append(el('span', null, label(S[i])), el('span', null, l ? where(l) : 'not installed'));
     ol.append(li);
   }
   t.append(ol);

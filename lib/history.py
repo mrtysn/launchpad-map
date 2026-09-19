@@ -2,12 +2,12 @@
 """Keep and show the history of Launchpad layouts.
 
 Snapshots live in the repo's layouts/ directory as
-`YYYY-MM-DD-HHMM-<label>.json`. `dump --save` adds one by hand. `write` adds
-an "Applied" snapshot after every change, carrying the proposal's note, and
-first a "Live layout" one if the grid has drifted since the last snapshot
-(an update can pull an app out of its folder). A layout with "draft": true is
+`YYYY-MM-DD-HHMM.json`. `dump --save` adds one by hand. `write` adds
+one after every change, carrying the proposal's note, and first one of the
+grid as it was if it drifted since the last snapshot (an update can pull an
+app out of its folder). A layout with "draft": true is
 a proposal; it is shown after the snapshots until `write` applies it, which
-removes the draft, since the Applied snapshot now holds it.
+removes the draft, since the new snapshot now holds it.
 
 `history` renders every snapshot in time order, drafts last, to one page.
 """
@@ -17,7 +17,6 @@ import datetime
 import glob
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -30,10 +29,6 @@ LAYOUTS = os.path.join(REPO, "layouts")
 PAGE = os.path.join(REPO, "launchpad-history.html")
 
 
-def slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-") or "snapshot"
-
-
 def live_pages(db=None) -> list:
     conn, tmp = dump.open_snapshot(db or dump.db_path())
     try:
@@ -43,15 +38,15 @@ def live_pages(db=None) -> list:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
-def save_snapshot(title: str, db=None, directory=LAYOUTS, note=None) -> str:
+def save_snapshot(db=None, directory=LAYOUTS, note=None) -> str:
     """Dump the live layout into the history and return the file's path."""
     now = datetime.datetime.now()
-    doc = {"title": title, "date": now.date().isoformat(), "time": now.strftime("%H:%M")}
+    doc = {"date": now.date().isoformat(), "time": now.strftime("%H:%M")}
     if note:
         doc["note"] = note
     doc["pages"] = live_pages(db)
     os.makedirs(directory, exist_ok=True)
-    path = os.path.join(directory, f"{now:%Y-%m-%d-%H%M}-{slug(title)}.json")
+    path = os.path.join(directory, f"{now:%Y-%m-%d-%H%M}.json")
     with open(path, "w") as fh:
         fh.write(json.dumps(doc, indent=2, ensure_ascii=False) + "\n")
     return path
@@ -68,7 +63,7 @@ def drifted(db=None, directory=LAYOUTS) -> bool:
 
 
 def retire_draft(layout_path: str) -> None:
-    """Remove a draft once `write` has applied it; the Applied snapshot holds it."""
+    """Remove a draft once `write` has applied it; the new snapshot holds it."""
     with open(layout_path) as fh:
         if json.load(fh).get("draft") and os.path.dirname(os.path.abspath(layout_path)) == LAYOUTS:
             os.remove(layout_path)

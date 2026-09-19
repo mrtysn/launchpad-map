@@ -21,10 +21,9 @@ launchpad-map dump --save                   # add the live layout to the history
 launchpad-map history                       # render every snapshot to launchpad-history.html
 ```
 
-The history is the dated files in `layouts/` (`YYYY-MM-DD-HHMM-<label>.json`).
-`write` adds an "Applied" snapshot for every layout it applies, carrying the
-proposal's note, and first a "Live layout" one if the grid drifted since the
-last snapshot. `dump --save` adds one by hand. The page shows a timeline of snapshots; for the selected one it marks
+The history is the dated files in `layouts/` (`YYYY-MM-DD-HHMM.json`), shown by date and time.
+`write` adds one for every layout it applies, carrying the proposal's note, and
+first one of the grid as it was if it drifted since the last snapshot. `dump --save` adds one by hand. The page shows a timeline of snapshots; for the selected one it marks
 every app that moved (and from where), every new install, and everything
 uninstalled since the snapshot before. Search for an app to see where it lived
 in each snapshot.

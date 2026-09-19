@@ -112,14 +112,12 @@ def main() -> int:
     ap.add_argument("--date", help="snapshot date for the history view (default: "
                     "today, or the file date of --db)")
     ap.add_argument("--save", action="store_true",
-                    help="add the live layout to the history in layouts/ "
-                    "(titled by --title)")
+                    help="add the live layout to the history in layouts/")
     args = ap.parse_args()
 
     if args.save:
         import history
-        title = args.title if args.title != "Current Launchpad layout" else "Live layout"
-        print(history.save_snapshot(title, args.db))
+        print(history.save_snapshot(args.db))
         return 0
 
     path = args.db or db_path()
