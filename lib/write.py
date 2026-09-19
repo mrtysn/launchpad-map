@@ -251,7 +251,8 @@ def main() -> int:
 
     with open(args.layout) as fh:
         layout = render.normalize(json.load(fh), args.page_size)
-    name = layout["title"]
+    with open(args.layout) as fh:
+        note = json.load(fh).get("note")
 
     if args.dry_run:
         conn, tmp = dump.open_snapshot(path)
@@ -259,9 +260,8 @@ def main() -> int:
     else:
         target = backup(path, args.backup_dir)
         print(f"backed up to {target}", file=sys.stderr)
-        if not args.db:
-            snap = history.save_snapshot(f"Before {name}")
-            print(f"history: {snap}", file=sys.stderr)
+        if not args.db and history.drifted():
+            print(f"history: {history.save_snapshot('Live layout')}", file=sys.stderr)
         conn, tmp = sqlite3.connect(path), None
 
     try:
@@ -366,8 +366,8 @@ def main() -> int:
 
     print(f"Dock restarted; verified {len(wanted)} folders")
     if not args.db:
-        print(f"history: {history.save_snapshot(f'After {name}')}")
-        history.mark_applied(args.layout)
+        print(f"history: {history.save_snapshot('Applied', note=note)}")
+        history.retire_draft(args.layout)
     print(f"backup kept at {target}")
     return 0
 

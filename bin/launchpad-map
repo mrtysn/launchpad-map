@@ -33,11 +33,11 @@ COMMANDS
 
   history  Render every snapshot in layouts/, oldest first and drafts last,
            to launchpad-history.html in the repo. `dump --save` adds a
-           snapshot by hand; `write` adds one before and after each change.
+           snapshot by hand; `write` adds one for each layout it applies.
 
   write    Apply a layout to the live Launchpad database. Backs the database
            up first, applies everything in one transaction, then restarts the
-           Dock. Saves a snapshot to the history before and after. Use
+           Dock. Adds an "Applied" snapshot to the history. Use
            --dry-run to see the report without writing.
 
 EXAMPLES
