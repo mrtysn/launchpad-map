@@ -16,8 +16,22 @@ launchpad-map render --layout layouts/current.json \
 launchpad-map write layouts/proposed.json --dry-run
 ```
 
-Passing `--layout` more than once produces a tabbed page, which is the point:
-edit a copy of your dump by hand, render both, and flip between them.
+```
+launchpad-map dump --save                   # add the live layout to the history
+launchpad-map history                       # render every snapshot to launchpad-history.html
+```
+
+The history is the dated files in `layouts/` (`YYYY-MM-DD-HHMM-<label>.json`).
+`write` adds one before and after every change, and `dump --save` adds one by
+hand. The page shows a timeline of snapshots; for the selected one it marks
+every app that moved (and from where), every new install, and everything
+uninstalled since the snapshot before. Search for an app to see where it lived
+in each snapshot.
+
+A proposal is a layout with `"draft": true`, plus an optional `"note"`. It is
+shown after the snapshots until `write` applies it, which marks it `"applied"`
+and drops it from the history. `layouts/*.json` is gitignored: a snapshot is an
+inventory of one machine's apps.
 
 ## The layout format
 

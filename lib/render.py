@@ -2,13 +2,14 @@
 """Render one or more layout JSON documents as a self-contained Launchpad mock-up.
 
 Every icon is embedded as a base64 data URI, so the resulting HTML file works
-offline and can be moved anywhere. Pass --layout more than once to get a tabbed
-page for comparing layouts (current versus proposed, say).
+offline and can be moved anywhere. Pass --layout more than once, oldest first,
+to get a history view: a timeline of snapshots, each shown with what moved,
+what is new and what was uninstalled since the one before. A layout with
+"draft": true is marked as not applied.
 """
 
 import argparse
 import base64
-import html
 import json
 import os
 import subprocess
@@ -90,7 +91,14 @@ def normalize(doc: dict, page_size: int) -> dict:
                 items.append({"kind": "app", "title": entry["app"]})
         if items:  # the database keeps empty pages around; Launchpad never shows them
             pages.append(items)
-    return {"title": doc.get("title", "Layout"), "pages": pages}
+    return {
+        "title": doc.get("title", "Layout"),
+        "date": doc.get("date"),
+        "time": doc.get("time"),
+        "draft": bool(doc.get("draft")),
+        "note": doc.get("note"),
+        "pages": pages,
+    }
 
 
 def collect_titles(layouts) -> set:
@@ -106,232 +114,582 @@ def collect_titles(layouts) -> set:
 
 
 # --- HTML -------------------------------------------------------------------
+#
+# The page is rendered in the browser from one embedded JSON document, so each
+# icon is stored once however many snapshots and folders it appears in.
 
 CSS = """
 :root {
-  --tile: 104px; --gap: 26px; --radius: 22px;
-  --ink: #f5f5f7; --dim: #a8a8b3; --warn: #ff6b6b;
+  --ink: #eef1f7; --dim: #98a2b6; --faint: rgba(238,241,247,.42);
+  --line: rgba(255,255,255,.12); --glass: rgba(255,255,255,.07);
+  --moved: #f3b544; --new: #52d6b0; --gone: #f08497; --warn: #ff7a6b;
+  --tile: 96px; --icon: 64px;
 }
 * { box-sizing: border-box; }
+html { color-scheme: dark; }
 body {
-  margin: 0; padding: 0 0 60px;
-  font: 13px/1.4 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif;
-  color: var(--ink);
-  background: #101014 radial-gradient(120% 90% at 50% 0%, #23303a 0%, #0d0d11 70%) fixed;
+  margin: 0; min-height: 100vh; color: var(--ink);
+  font: 13px/1.45 -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  background: #141b2b radial-gradient(140% 100% at 20% -10%, #2a3a57 0%, #151c2c 55%, #10141f 100%) fixed;
   -webkit-font-smoothing: antialiased;
+  display: grid; grid-template-columns: minmax(0, 1fr) 248px;
 }
-header { padding: 28px 32px 8px; }
-h1 { margin: 0 0 4px; font-size: 19px; font-weight: 600; letter-spacing: -0.01em; }
-.sub { color: var(--dim); font-size: 12.5px; }
-.tabs { display: flex; gap: 8px; flex-wrap: wrap; padding: 16px 32px 0; }
-.tab {
-  appearance: none; border: 1px solid rgba(255,255,255,.14); cursor: pointer;
-  background: rgba(255,255,255,.06); color: var(--ink);
-  padding: 7px 15px; border-radius: 999px; font-size: 12.5px; font-family: inherit;
+button, input, select { font: inherit; color: inherit; }
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 3px; border-radius: 6px; }
+
+/* Timeline rail: newest at the top, like Time Machine. */
+.rail {
+  position: sticky; top: 0; height: 100vh; overflow-y: auto;
+  border-left: 1px solid var(--line); padding: 28px 18px 28px 0;
+  background: rgba(10,14,24,.35);
 }
-.tab[aria-selected="true"] { background: rgba(255,255,255,.9); color: #16161a; border-color: transparent; }
-.layout[hidden] { display: none; }
-.page { padding: 26px 32px 6px; }
-.page > h2 {
-  margin: 0 0 18px; font-size: 11px; font-weight: 600; letter-spacing: .09em;
-  text-transform: uppercase; color: var(--dim);
+.rail ol { list-style: none; margin: 0; padding: 0; position: relative; }
+.rail ol::before {
+  content: ""; position: absolute; left: 27px; top: 14px; bottom: 14px;
+  width: 1px; background: var(--line);
 }
-.grid {
-  display: grid; grid-template-columns: repeat(7, var(--tile));
-  gap: var(--gap) 18px; justify-content: start;
+.snap {
+  appearance: none; border: 0; background: none; cursor: pointer; text-align: left;
+  display: grid; grid-template-columns: 56px 1fr; width: 100%;
+  padding: 10px 10px 10px 0; border-radius: 0 12px 12px 0; color: var(--dim);
 }
-.cell { text-align: center; }
-.cell img, .folder-tile, .ph {
-  width: 72px; height: 72px; display: block; margin: 0 auto 7px;
+.snap:hover { background: var(--glass); }
+.snap[aria-current="true"] { background: rgba(255,255,255,.11); color: var(--ink); }
+.dot {
+  width: 11px; height: 11px; border-radius: 50%; margin: 5px 0 0 22px;
+  background: #151c2c; border: 2px solid var(--dim); position: relative;
 }
-.ph {
-  border-radius: 16px; background: rgba(255,255,255,.1);
-  display: flex; align-items: center; justify-content: center;
-  font-size: 28px; font-weight: 300; color: var(--dim);
+.snap[aria-current="true"] .dot { background: var(--ink); border-color: var(--ink);
+  box-shadow: 0 0 0 5px rgba(238,241,247,.14); }
+.snap.draft .dot { border-style: dashed; }
+.snap.base .dot { border-color: var(--moved); }
+.when { font-size: 15px; font-weight: 600; color: inherit; font-variant-numeric: tabular-nums;
+  letter-spacing: -.01em; }
+.what { display: block; font-size: 12.5px; }
+.stat { display: block; font-size: 11.5px; color: var(--faint); margin-top: 2px;
+  font-variant-numeric: tabular-nums; }
+.stat b { font-weight: 500; }
+.stat .up { color: var(--new); } .stat .down { color: var(--gone); }
+
+main { padding: 28px 40px 80px; min-width: 0; }
+.top { display: flex; gap: 24px; align-items: flex-start; justify-content: space-between;
+  flex-wrap: wrap; }
+h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: -.02em; line-height: 1.1; }
+h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
+  letter-spacing: 0; margin-top: 6px; }
+.find { position: relative; width: min(320px, 100%); }
+.find input {
+  width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid var(--line);
+  background: rgba(0,0,0,.22);
 }
-.label {
-  font-size: 11.5px; line-height: 1.25; color: var(--ink);
-  text-shadow: 0 1px 3px rgba(0,0,0,.65);
-  overflow-wrap: anywhere;
+.find input::placeholder { color: var(--faint); }
+.trail {
+  position: absolute; right: 0; top: calc(100% + 8px); width: 100%; z-index: 5;
+  background: rgba(28,36,54,.96); border: 1px solid var(--line); border-radius: 12px;
+  padding: 12px 14px; backdrop-filter: blur(20px);
 }
+.trail[hidden] { display: none; }
+.trail h2 { margin: 0 0 8px; font-size: 13px; font-weight: 600; }
+.trail ol { list-style: none; margin: 0; padding: 0; }
+.trail li { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0;
+  font-size: 12.5px; }
+.trail li span:first-child { color: var(--dim); font-variant-numeric: tabular-nums; }
+.trail li.absent span:last-child { color: var(--faint); }
+.trail li.here { color: var(--ink); font-weight: 600; }
+.trail .more { color: var(--faint); font-size: 11.5px; margin: 8px 0 0; }
+
+.compare { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 10px;
+  margin: 22px 0 6px; color: var(--dim); }
+.compare select {
+  background: rgba(0,0,0,.22); border: 1px solid var(--line); border-radius: 8px;
+  padding: 5px 8px;
+}
+.chip {
+  appearance: none; cursor: pointer; border: 1px solid var(--line); background: none;
+  border-radius: 999px; padding: 4px 12px 4px 10px; display: inline-flex; align-items: center;
+  gap: 7px; font-variant-numeric: tabular-nums;
+}
+.chip i { width: 8px; height: 8px; border-radius: 50%; display: block; }
+.chip[aria-pressed="true"] { background: rgba(255,255,255,.14); border-color: transparent; }
+.chip[hidden] { display: none; }
+.chip.moved i { background: var(--moved); } .chip.new i { background: var(--new); }
+.chip.gone i { background: var(--gone); }
+
+#digest { max-width: 76ch; }
+.note { margin: 18px 0 0; font-size: 14px; line-height: 1.55; color: var(--ink); }
+#digest dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px;
+  margin: 16px 0 0; font-size: 12.5px; }
+#digest dt { color: var(--dim); }
+#digest dd { margin: 0; }
+/* Every page on screen at once, left to right, as Launchpad orders them. */
+#pages { display: flex; gap: 20px; overflow-x: auto; margin-top: 30px; padding-bottom: 8px; }
+.page { flex: 1 1 0; min-width: 460px; container-type: inline-size;
+  border: 1px solid var(--line); border-radius: 18px; padding: 16px 16px 20px;
+  background: rgba(255,255,255,.025); }
+.page .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 16px 4px; }
+.page .iw { width: min(var(--icon), 10.5cqi); height: min(var(--icon), 10.5cqi); }
+.page h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600; }
+.page h2 span { font-weight: 400; color: var(--dim); margin-left: 8px; }
+.page h2 .over { color: var(--warn); }
+.grid { display: grid; grid-template-columns: repeat(7, var(--tile)); gap: 22px 14px; }
+
+.cell { text-align: center; position: relative; transition: opacity .2s; }
 button.cell { appearance: none; border: 0; background: none; padding: 0; cursor: pointer;
-  font-family: inherit; color: inherit; }
-.folder-tile {
-  border-radius: 18px; background: rgba(160,160,170,.34);
-  backdrop-filter: blur(8px); padding: 7px;
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px;
-}
-.folder-tile img { width: 100%; height: auto; margin: 0; border-radius: 3px; }
-.count { color: var(--dim); font-size: 10.5px; display: block; margin-top: 2px; }
+  display: flex; flex-direction: column; align-items: center; }
+.cell { align-self: start; }
+.iw { position: relative; width: var(--icon); height: var(--icon); margin: 0 auto 6px; }
+.ic { width: 100%; height: 100%; display: block; }
+.ph { border-radius: 15px; background: rgba(255,255,255,.1); display: flex;
+  align-items: center; justify-content: center; font-size: 26px; font-weight: 300; color: var(--dim); }
+.label { font-size: 11.5px; line-height: 1.3; white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; max-width: 100%;
+  text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+.why { font-size: 10.5px; margin-top: 2px; line-height: 1.2; }
+.mark { position: absolute; top: -3px; right: -3px; width: 13px; height: 13px;
+  border-radius: 50%; border: 2px solid #1a2233; }
+.moved .mark { background: var(--moved); } .moved .why { color: var(--moved); }
+.new .mark { background: var(--new); } .new .why { color: var(--new); }
+.dim { opacity: .16; }
+.hit .iw { outline: 2px solid var(--ink); outline-offset: 4px; border-radius: 16px; }
+
+.folder { width: 100%; height: 100%; border-radius: 16px; background: rgba(170,176,190,.28);
+  padding: 6px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 3px; align-content: start; }
+.folder img { width: 100%; display: block; }
+.count { display: block; font-size: 10.5px; color: var(--faint); margin-top: 1px; }
 .count.over { color: var(--warn); font-weight: 600; }
-dialog {
-  border: 0; padding: 0; background: transparent; color: var(--ink); max-width: 92vw;
+
+.gone-row { margin-top: 44px; padding-top: 22px; border-top: 1px dashed var(--line); }
+.gone-row h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600; color: var(--gone); }
+.gone-row .cell { opacity: .55; }
+.gone-row .cell .ic { filter: grayscale(1); }
+
+dialog { border: 0; padding: 0; background: transparent; color: var(--ink);
+  max-width: min(92vw, 820px); max-height: 88vh; }
+dialog::backdrop { background: rgba(8,10,16,.6); backdrop-filter: blur(14px); }
+.sheet { background: rgba(110,118,136,.28); border: 1px solid var(--line); border-radius: 26px;
+  padding: 26px 30px 30px; backdrop-filter: blur(26px); position: relative; }
+.sheet h3 { margin: 0; font-size: 20px; font-weight: 600; text-align: center; }
+.sheet .meta { text-align: center; color: var(--dim); margin: 4px 0 22px; }
+.sheet .grid { justify-content: center; }
+.sheet hr { border: 0; border-top: 1px dashed var(--line); margin: 22px 0; }
+.out { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--line); }
+.out h4 { margin: 0 0 8px; font-size: 12.5px; font-weight: 600; color: var(--dim); }
+.out ul { margin: 0; padding: 0; list-style: none; columns: 2 220px; column-gap: 24px; }
+.out li { padding: 2px 0; font-size: 12.5px; break-inside: avoid; }
+.out li span { color: var(--moved); }
+.close { position: absolute; top: 12px; right: 16px; appearance: none; border: 0;
+  background: none; color: var(--dim); font-size: 24px; line-height: 1; cursor: pointer; }
+
+@keyframes land { from { transform: scale(.4); opacity: 0; } }
+
+.mark { animation: land .35s cubic-bezier(.2,.9,.3,1.3) both; }
+@media (prefers-reduced-motion: reduce) {   .mark { animation: none; } .cell { transition: none; } }
+
+@media (max-width: 900px) {
+  body { grid-template-columns: minmax(0, 1fr); }
+  .rail { position: static; height: auto; border-left: 0; border-bottom: 1px solid var(--line);
+    padding: 12px 16px; order: -1; overflow-x: auto; }
+  .rail ol { display: flex; gap: 6px; }
+  .rail ol::before { display: none; }
+  .snap { grid-template-columns: 1fr; padding: 8px 12px; border-radius: 12px; min-width: 150px; }
+  .dot { display: none; }
+  main { padding: 20px 16px 60px; }
+  :root { --tile: 78px; --icon: 52px; }
+  .grid { grid-template-columns: repeat(auto-fill, var(--tile)); justify-content: space-between; }
 }
-dialog::backdrop { background: rgba(8,8,10,.62); backdrop-filter: blur(14px); }
-.sheet {
-  background: rgba(120,120,130,.30); border: 1px solid rgba(255,255,255,.14);
-  border-radius: 26px; padding: 26px 30px 30px; backdrop-filter: blur(26px);
-}
-.sheet h3 { margin: 0 0 4px; font-size: 17px; font-weight: 600; text-align: center; }
-.sheet .meta { text-align: center; color: var(--dim); margin: 0 0 22px; font-size: 12px; }
-.sheet .grid { gap: 20px 18px; }
-.sheet hr {
-  border: 0; border-top: 1px dashed rgba(255,255,255,.22); margin: 22px 0 20px;
-}
-.pagemark { text-align: center; color: var(--warn); font-size: 11px; margin: 0 0 16px;
-  letter-spacing: .04em; text-transform: uppercase; }
-.close {
-  position: absolute; top: 14px; right: 18px; appearance: none; border: 0;
-  background: none; color: var(--dim); font-size: 22px; cursor: pointer; line-height: 1;
-}
-footer { color: var(--dim); padding: 30px 32px 0; font-size: 12px; }
 """
 
-JS = """
-document.querySelectorAll('.tab').forEach(function (tab) {
-  tab.addEventListener('click', function () {
-    var group = tab.closest('.tabs');
-    group.querySelectorAll('.tab').forEach(function (t) {
-      t.setAttribute('aria-selected', String(t === tab));
-    });
-    document.querySelectorAll('.layout').forEach(function (l) {
-      l.hidden = l.dataset.layout !== tab.dataset.layout;
-    });
+JS = r"""
+const D = JSON.parse(document.getElementById('data').textContent);
+const S = D.snapshots, ICON = D.icons, PAGE = D.pageSize;
+// Open on the newest snapshot, compared with the one before it: the live
+// layout against its proposal, when there is one.
+let cur = S.length - 1, base = S.length - 2, baseAuto = true, filter = null, query = '';
+
+const $ = s => document.querySelector(s);
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = text;
+  return e;
+}
+function when(s) { return s.date ? fmtDate(s.date) + (s.time ? ', ' + s.time : '') : ''; }
+function label(s) { return s.date ? s.title + ', ' + when(s) : s.title; }
+function fmtDate(d) {
+  if (!d) return '';
+  const t = new Date(d + 'T12:00:00');
+  return isNaN(t) ? d : t.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function locs(s) {
+  if (s._l) return s._l;
+  const m = new Map();
+  s.pages.forEach((p, pi) => p.forEach(it => {
+    if (it.kind === 'app') m.set(it.title, { folder: null, page: pi });
+    else it.apps.forEach(a => m.set(a, { folder: it.title, page: pi }));
+  }));
+  return (s._l = m);
+}
+function where(l) { return l.folder || 'Page ' + (l.page + 1); }
+
+// A folder counts as renamed, not dissolved, when at least half of its apps
+// went to one folder of another name; its apps then have not moved.
+let _fm = null;
+function folderMap() {
+  const key = cur + ':' + base;
+  if (_fm && _fm.key === key) return _fm.map;
+  const b = locs(S[base]), c = locs(S[cur]), flows = {}, size = {}, map = {};
+  b.forEach((l, a) => {
+    if (!l.folder) return;
+    size[l.folder] = (size[l.folder] || 0) + 1;
+    const cl = c.get(a);
+    if (!cl || !cl.folder) return;
+    const f = (flows[l.folder] = flows[l.folder] || {});
+    f[cl.folder] = (f[cl.folder] || 0) + 1;
   });
-});
-document.querySelectorAll('button.cell[data-folder]').forEach(function (btn) {
-  btn.addEventListener('click', function () {
-    document.getElementById(btn.dataset.folder).showModal();
+  for (const bf in flows) {
+    const [cf, n] = Object.entries(flows[bf]).sort((x, y) => y[1] - x[1])[0];
+    if (n * 2 >= size[bf]) map[bf] = cf;
+  }
+  _fm = { key, map };
+  return map;
+}
+function status(app) {
+  if (base < 0) return null;
+  const b = locs(S[base]).get(app);
+  if (!b) return { k: 'new' };
+  const c = locs(S[cur]).get(app);
+  const expected = b.folder ? (folderMap()[b.folder] || b.folder) : where(b);
+  if (expected !== where(c)) return { k: 'moved', from: where(b) };
+  return null;
+}
+
+// The page a folder was on in the base snapshot, under its old name if it was
+// renamed; null when it is new or on the same page now.
+function folderFrom(name, page) {
+  if (base < 0) return null;
+  const map = folderMap();
+  const olds = [name, ...Object.keys(map).filter(b => map[b] === name)];
+  let was = -1;
+  S[base].pages.forEach((p, pi) => p.forEach(x => {
+    if (x.kind === 'folder' && was < 0 && olds.includes(x.title)) was = pi;
+  }));
+  return was >= 0 && was !== page ? 'page ' + (was + 1) : null;
+}
+function folderPage(f) { return S[cur].pages.findIndex(p => p.includes(f)); }
+
+function folderIsNew(name) {
+  if (base < 0) return false;
+  const before = S[base].pages.flat().some(x => x.kind === 'folder' && x.title === name);
+  return !before && !Object.values(folderMap()).includes(name);
+}
+
+function drawDigest() {
+  const box = $('#digest');
+  box.replaceChildren();
+  const note = S[cur].note;
+  if (note) box.append(el('p', 'note', note));
+  if (base < 0) return;
+  const map = folderMap();
+  const folders = s => s.pages.flat().filter(x => x.kind === 'folder').map(x => x.title);
+  const before = folders(S[base]), after = folders(S[cur]);
+  const kept = new Set(Object.values(map));
+  const into = {};
+  Object.entries(map).forEach(([b, c]) => (into[c] = into[c] || []).push(b));
+  const merged = Object.entries(into).filter(([c, bs]) => bs.length > 1);
+  const renamed = Object.entries(map).filter(([b, c]) => b !== c && into[c].length === 1);
+  const created = after.filter(f => !kept.has(f) && !before.includes(f));
+  const dissolved = before.filter(f => !(f in map) && !after.includes(f));
+  const rows = [];
+  if (renamed.length) rows.push(['Renamed', renamed.map(([b, c]) => b + ' to ' + c).join(', ')]);
+  if (merged.length) rows.push(['Merged', merged.map(([c, bs]) => bs.join(' and ') + ' into ' + c).join(', ')]);
+  if (created.length) rows.push(['New folders', created.join(', ')]);
+  if (dissolved.length) rows.push(['Broken up', dissolved.join(', ')]);
+  if (!rows.length) return;
+  const dl = el('dl');
+  rows.forEach(([k, v]) => dl.append(el('dt', null, k), el('dd', null, v)));
+  box.append(dl);
+}
+function gone() {
+  if (base < 0) return [];
+  const now = locs(S[cur]);
+  return [...locs(S[base]).keys()].filter(a => !now.has(a));
+}
+function matches(app) {
+  const st = status(app);
+  return (!filter || (st && st.k === filter)) && (!query || app.toLowerCase().includes(query));
+}
+const narrowing = () => !!(filter || query);
+
+function icon(t) {
+  if (ICON[t]) { const i = el('img', 'ic'); i.src = ICON[t]; i.alt = ''; return i; }
+  return el('div', 'ic ph', (t[0] || '?').toUpperCase());
+}
+function appCell(t, withStatus = true) {
+  const st = withStatus ? status(t) : null;
+  const c = el('div', 'cell' + (st ? ' ' + st.k : ''));
+  const w = el('div', 'iw');
+  w.append(icon(t));
+  if (st) w.append(el('span', 'mark'));
+  const lb = el('div', 'label', t); lb.title = t;
+  c.append(w, lb);
+  if (st) c.append(el('div', 'why', st.k === 'new' ? 'new' : 'from ' + st.from));
+  if (narrowing() && withStatus) c.classList.add(matches(t) ? 'hit' : 'dim');
+  return c;
+}
+function folderCell(f) {
+  const b = el('button', 'cell');
+  b.type = 'button';
+  const w = el('div', 'iw'), tile = el('div', 'folder');
+  f.apps.slice(0, 9).forEach(a => { if (ICON[a]) { const i = el('img'); i.src = ICON[a]; i.alt = ''; tile.append(i); } });
+  w.append(tile);
+  const sts = f.apps.map(status).filter(Boolean);
+  const fresh = folderIsNew(f.title);
+  const pages = Math.ceil(f.apps.length / PAGE) || 1;
+  const moved = sts.filter(x => x.k === 'moved').length, added = sts.length - moved;
+  const from = fresh ? null : folderFrom(f.title, folderPage(f));
+  const parts = [];
+  if (fresh) parts.push('new folder');
+  if (from) parts.push('from ' + from);
+  if (!fresh && moved) parts.push(moved + ' moved in');
+  if (!fresh && added) parts.push(added + ' new');
+  const why = parts.join(', ');
+  if (why) { b.classList.add(fresh || (!moved && !from) ? 'new' : 'moved'); w.append(el('span', 'mark')); }
+  const lb = el('div', 'label', f.title); lb.title = f.title;
+  b.append(w, lb,
+    el('span', 'count' + (pages > 1 ? ' over' : ''), f.apps.length + (pages > 1 ? ' apps, ' + pages + ' pages' : ' apps')));
+  if (why) b.append(el('div', 'why', why));
+  b.setAttribute('aria-label', f.title + ', folder of ' + f.apps.length + ' apps' + (why ? ', ' + why : ''));
+  const self = filter === 'folders' && from && (!query || f.title.toLowerCase().includes(query));
+  if (narrowing()) b.classList.add(self || f.apps.some(matches) ? 'hit' : 'dim');
+  b.addEventListener('click', () => openFolder(f));
+  return b;
+}
+
+function openFolder(f) {
+  const dlg = $('#folder'), sh = dlg.querySelector('.sheet');
+  sh.replaceChildren();
+  const x = el('button', 'close', '×'); x.type = 'button'; x.setAttribute('aria-label', 'Close');
+  x.addEventListener('click', () => dlg.close());
+  const sts = f.apps.map(status).filter(Boolean);
+  const moved = sts.filter(s => s.k === 'moved').length, added = sts.length - moved;
+  let meta = f.apps.length + ' apps';
+  if (moved) meta += ', ' + moved + ' moved in';
+  if (added) meta += ', ' + added + ' new';
+  sh.append(x, el('h3', null, f.title), el('p', 'meta', meta));
+  for (let i = 0; i < f.apps.length || i === 0; i += PAGE) {
+    if (i) sh.append(el('hr'));
+    const g = el('div', 'grid');
+    f.apps.slice(i, i + PAGE).forEach(a => g.append(appCell(a)));
+    sh.append(g);
+  }
+  if (base >= 0) {
+    const now = locs(S[cur]);
+    const out = [...locs(S[base])].filter(([a, l]) => l.folder === f.title && now.get(a) && now.get(a).folder !== f.title);
+    const lost = [...locs(S[base])].filter(([a, l]) => l.folder === f.title && !now.get(a));
+    if (out.length || lost.length) {
+      const box = el('div', 'out');
+      box.append(el('h4', null, 'Moved out'));
+      const ul = el('ul');
+      out.forEach(([a]) => { const li = el('li', null, a + ' '); li.append(el('span', null, 'now in ' + where(now.get(a)))); ul.append(li); });
+      lost.forEach(([a]) => { const li = el('li', null, a + ' '); const s = el('span', null, 'uninstalled'); s.style.color = 'var(--gone)'; li.append(s); ul.append(li); });
+      box.append(ul); sh.append(box);
+    }
+  }
+  dlg.showModal();
+}
+
+function drawRail() {
+  const ol = $('.rail ol');
+  ol.replaceChildren();
+  for (let i = S.length - 1; i >= 0; i--) {
+    const s = S[i], li = el('li'), b = el('button', 'snap' + (s.draft ? ' draft' : '') + (i === base ? ' base' : ''));
+    b.type = 'button';
+    b.setAttribute('aria-current', String(i === cur));
+    const n = locs(s).size, folders = s.pages.flat().filter(x => x.kind === 'folder').length;
+    const txt = el('span');
+    txt.append(el('span', 'when', when(s) || s.title));
+    if (s.date) txt.append(el('span', 'what', s.title));
+    const st = el('span', 'stat', n + ' apps, ' + folders + ' folders');
+    if (i > 0) {
+      const prev = locs(S[i - 1]), now = locs(s);
+      const add = [...now.keys()].filter(a => !prev.has(a)).length;
+      const del = [...prev.keys()].filter(a => !now.has(a)).length;
+      if (add || del) {
+        st.append(document.createElement('br'));
+        if (add) st.append(el('b', 'up', '+' + add + ' installed '));
+        if (del) st.append(el('b', 'down', '−' + del + ' removed'));
+      }
+    }
+    txt.append(st);
+    b.append(el('span', 'dot'), txt);
+    b.addEventListener('click', () => select(i));
+    li.append(b); ol.append(li);
+  }
+}
+
+function drawHead() {
+  const s = S[cur];
+  const h = $('h1');
+  h.replaceChildren(document.createTextNode(s.title + (s.draft ? ' (not applied)' : '')));
+  const n = locs(s).size, folders = s.pages.flat().filter(x => x.kind === 'folder').length;
+  const loose = s.pages.flat().filter(x => x.kind === 'app').length;
+  h.append(el('small', null, n + ' apps, ' + s.pages.length + (s.pages.length === 1 ? ' page, ' : ' pages, ') +
+    folders + ' folders, ' + loose + ' loose'));
+
+  const sel = $('#base');
+  sel.replaceChildren(new Option('nothing', -1));
+  S.forEach((o, i) => { if (i !== cur) sel.append(new Option(label(o), i)); });
+  sel.value = String(base);
+
+  const all = [...locs(s).keys()].map(status).filter(Boolean);
+  const movedFolders = s.pages.flat().filter(x => x.kind === 'folder' && !folderIsNew(x.title) && folderFrom(x.title, folderPage(x))).length;
+  const counts = { moved: all.filter(x => x.k === 'moved').length, folders: movedFolders, new: all.filter(x => x.k === 'new').length, gone: gone().length };
+  const names = { moved: 'apps moved', folders: 'folders moved', new: 'new', gone: 'uninstalled' };
+  document.querySelectorAll('.chip').forEach(c => {
+    const k = c.dataset.k;
+    c.lastChild.textContent = counts[k] + ' ' + names[k];
+    c.setAttribute('aria-pressed', String(filter === k));
+    c.hidden = base < 0 || !counts[k];
   });
+}
+
+function drawPages() {
+  const m = $('#pages');
+  m.replaceChildren();
+  S[cur].pages.forEach((p, pi) => {
+    const sec = el('section', 'page');
+    const h = el('h2', null, 'Page ' + (pi + 1));
+    h.append(el('span', p.length > PAGE ? 'over' : null, p.length + ' of ' + PAGE));
+    const g = el('div', 'grid');
+    p.forEach(it => g.append(it.kind === 'app' ? appCell(it.title) : folderCell(it)));
+    sec.append(h, g); m.append(sec);
+  });
+  const gbox = $('#gone');
+  gbox.replaceChildren();
+  const g = gone();
+  if (g.length) {
+    const sec = el('section', 'gone-row');
+    sec.append(el('h2', null, 'Uninstalled since ' + (fmtDate(S[base].date) || S[base].title)));
+    const grid = el('div', 'grid');
+    g.forEach(a => grid.append(appCell(a, false)));
+    sec.append(grid); gbox.append(sec);
+  }
+}
+
+
+function drawTrail() {
+  const t = $('.trail');
+  if (!query) { t.hidden = true; return; }
+  const every = new Set();
+  S.forEach(s => locs(s).forEach((_, a) => every.add(a)));
+  const hits = [...every].filter(a => a.toLowerCase().includes(query)).sort((a, b) =>
+    (a.toLowerCase().startsWith(query) ? 0 : 1) - (b.toLowerCase().startsWith(query) ? 0 : 1) || a.localeCompare(b));
+  t.replaceChildren();
+  if (!hits.length) { t.append(el('p', 'more', 'No matches')); t.hidden = false; return; }
+  const app = hits[0];
+  t.append(el('h2', null, app));
+  const ol = el('ol');
+  for (let i = S.length - 1; i >= 0; i--) {
+    const l = locs(S[i]).get(app);
+    const li = el('li', (l ? '' : 'absent') + (i === cur ? ' here' : ''));
+    li.append(el('span', null, when(S[i]) || S[i].title), el('span', null, l ? where(l) : 'not installed'));
+    ol.append(li);
+  }
+  t.append(ol);
+  if (hits.length > 1) t.append(el('p', 'more', 'Also matches: ' + hits.slice(1, 6).join(', ') + (hits.length > 6 ? '…' : '')));
+  t.hidden = false;
+}
+
+function draw() { drawRail(); drawHead(); drawDigest(); drawPages(); drawTrail(); }
+function select(i) {
+  cur = i;
+  if (baseAuto) base = i - 1;
+  if (base === cur) base = -1;
+  filter = null;
+  draw();
+}
+
+$('#base').addEventListener('change', e => { base = +e.target.value; baseAuto = false; filter = null; draw(); holdHead(); });
+document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
+  if (c.dataset.k === 'gone') { $('#gone').scrollIntoView({ behavior: 'smooth' }); return; }
+  filter = filter === c.dataset.k ? null : c.dataset.k;
+  drawHead(); drawPages();
+}));
+$('#q').addEventListener('input', e => { query = e.target.value.trim().toLowerCase(); drawPages(); drawTrail(); });
+$('#q').addEventListener('keydown', e => { if (e.key === 'Escape') { e.target.value = ''; query = ''; drawPages(); drawTrail(); } });
+$('#folder').addEventListener('click', e => { if (e.target.id === 'folder') e.target.close(); });
+document.addEventListener('keydown', e => {
+  if (e.target.closest('input, select, dialog')) return;
+  if (e.key === 'ArrowUp' && cur < S.length - 1) { e.preventDefault(); select(cur + 1); }
+  if (e.key === 'ArrowDown' && cur > 0) { e.preventDefault(); select(cur - 1); }
+  if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
 });
-document.querySelectorAll('dialog').forEach(function (d) {
-  d.addEventListener('click', function (e) { if (e.target === d) d.close(); });
-  var x = d.querySelector('.close');
-  if (x) x.addEventListener('click', function () { d.close(); });
-});
+if (S.length < 2) { document.querySelector('.rail').remove(); document.body.style.gridTemplateColumns = '1fr'; $('.compare').hidden = true; }
+// The header grows with the note and the folder summary. Reserve the tallest
+// one any snapshot needs, so the pages stay put while stepping through them.
+function holdHead() {
+  const head = $('#head'), was = [cur, base];
+  head.style.minHeight = '';
+  let tallest = 0;
+  S.forEach((_, i) => {
+    cur = i; base = baseAuto ? i - 1 : (was[1] === i ? -1 : was[1]);
+    drawHead(); drawDigest();
+    tallest = Math.max(tallest, head.offsetHeight);
+  });
+  [cur, base] = was;
+  drawHead(); drawDigest();
+  head.style.minHeight = tallest + 'px';
+}
+draw();
+holdHead();
+let _rz;
+addEventListener('resize', () => { clearTimeout(_rz); _rz = setTimeout(holdHead, 150); });
 """
-
-
-def icon_html(title, icons, ids, cls="") -> str:
-    bid = ids.get(title)
-    src = icons.get(bid) if bid else None
-    if src:
-        return f'<img src="{src}" alt="" loading="lazy">'
-    letter = html.escape(title[:1].upper() or "?")
-    return f'<div class="ph">{letter}</div>'
-
-
-def app_cell(title, icons, ids) -> str:
-    return (
-        '<div class="cell">'
-        + icon_html(title, icons, ids)
-        + f'<div class="label">{html.escape(title)}</div></div>'
-    )
-
-
-def folder_cell(item, icons, ids, dom_id, page_size) -> str:
-    minis = "".join(
-        icon_html(t, icons, ids) for t in item["apps"][:9] if ids.get(t) in icons
-    )
-    n_pages = len(item["pages"])
-    over = " over" if n_pages > 1 else ""
-    note = f"{len(item['apps'])} apps"
-    if n_pages > 1:
-        note += f" · {n_pages} pages"
-    return (
-        f'<button class="cell" data-folder="{dom_id}">'
-        f'<div class="folder-tile">{minis}</div>'
-        f'<div class="label">{html.escape(item["title"])}</div>'
-        f'<span class="count{over}">{note}</span></button>'
-    )
-
-
-def folder_dialog(item, icons, ids, dom_id) -> str:
-    blocks = []
-    for index, chunk in enumerate(item["pages"]):
-        if index:
-            blocks.append('<hr><p class="pagemark">page ' + str(index + 1) + "</p>")
-        cells = "".join(app_cell(t, icons, ids) for t in chunk)
-        blocks.append(f'<div class="grid">{cells}</div>')
-    n_pages = len(item["pages"])
-    meta = f"{len(item['apps'])} apps"
-    if n_pages > 1:
-        meta += f" — spills onto {n_pages} pages"
-    return (
-        f'<dialog id="{dom_id}"><div class="sheet">'
-        f'<button class="close" aria-label="Close">&times;</button>'
-        f'<h3>{html.escape(item["title"])}</h3>'
-        f'<p class="meta">{html.escape(meta)}</p>'
-        + "".join(blocks)
-        + "</div></dialog>"
-    )
 
 
 def render(layouts, icons, ids, page_size) -> str:
-    tabs, bodies, dialogs = [], [], []
-    for li, layout in enumerate(layouts):
-        slug = f"l{li}"
-        selected = "true" if li == 0 else "false"
-        tabs.append(
-            f'<button class="tab" data-layout="{slug}" aria-selected="{selected}">'
-            f'{html.escape(layout["title"])}</button>'
-        )
-
-        pages_html = []
-        for pi, page in enumerate(layout["pages"]):
-            cells = []
-            for ii, item in enumerate(page):
-                if item["kind"] == "app":
-                    cells.append(app_cell(item["title"], icons, ids))
-                else:
-                    dom_id = f"{slug}-p{pi}-f{ii}"
-                    cells.append(folder_cell(item, icons, ids, dom_id, page_size))
-                    dialogs.append(folder_dialog(item, icons, ids, dom_id))
-            over = len(page) > page_size
-            warn = (
-                f' <span class="count over">{len(page)} icons — over the '
-                f"{page_size} that fit</span>"
-                if over
-                else f' <span class="count">{len(page)} icons</span>'
-            )
-            pages_html.append(
-                f'<section class="page"><h2>Page {pi + 1}{warn}</h2>'
-                f'<div class="grid">{"".join(cells)}</div></section>'
-            )
-
-        folder_count = sum(
-            1 for p in layout["pages"] for i in p if i["kind"] == "folder"
-        )
-        spill = sum(
-            1
-            for p in layout["pages"]
-            for i in p
-            if i["kind"] == "folder" and len(i["pages"]) > 1
-        )
-        summary = (
-            f"{len(layout['pages'])} home pages · {folder_count} folders · "
-            f"{spill} folder(s) spilling onto a second page"
-        )
-        bodies.append(
-            f'<div class="layout" data-layout="{slug}"{"" if li == 0 else " hidden"}>'
-            f'<footer>{html.escape(summary)}</footer>'
-            + "".join(pages_html)
-            + "</div>"
-        )
-
+    """Render the snapshots, oldest first, as one page with a history rail."""
+    by_title = {t: icons[ids[t]] for t in collect_titles(layouts) if ids.get(t) in icons}
+    data = {
+        "pageSize": page_size,
+        "icons": by_title,
+        "snapshots": [
+            {k: layout[k] for k in ("title", "date", "time", "draft", "note", "pages")} for layout in layouts
+        ],
+    }
+    blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+    heading = "Launchpad history" if len(layouts) > 1 else "Launchpad layout"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Launchpad layout</title>
+<title>{heading}</title>
 <style>{CSS}</style></head><body>
-<header>
-  <h1>Launchpad layout</h1>
-  <div class="sub">Click any folder to see what is inside it.
-  A folder page holds {page_size} icons ({page_size // 5}&times;5).</div>
-</header>
-<div class="tabs">{"".join(tabs)}</div>
-{"".join(bodies)}
-{"".join(dialogs)}
+<main>
+  <header id="head">
+  <div class="top">
+    <h1></h1>
+    <div class="find">
+      <input id="q" type="search" placeholder="Find an app" autocomplete="off"
+             aria-label="Find an app and see where it has been">
+      <div class="trail" hidden aria-live="polite"></div>
+    </div>
+  </div>
+  <div class="compare">
+    <label for="base">Changes since</label> <select id="base"></select>
+    <button class="chip moved" type="button" data-k="moved"><i></i><span></span></button>
+    <button class="chip moved" type="button" data-k="folders"><i></i><span></span></button>
+    <button class="chip new" type="button" data-k="new"><i></i><span></span></button>
+    <button class="chip gone" type="button" data-k="gone"><i></i><span></span></button>
+  </div>
+  <div id="digest"></div>
+  </header>
+  <div id="pages"></div>
+  <div id="gone"></div>
+</main>
+<nav class="rail" aria-label="Snapshots, newest first"><ol></ol></nav>
+<dialog id="folder" aria-label="Folder contents"><div class="sheet"></div></dialog>
+<script type="application/json" id="data">{blob}</script>
 <script>{JS}</script>
 </body></html>
 """
@@ -348,7 +706,7 @@ def main() -> int:
         "-l",
         action="append",
         default=[],
-        help="layout JSON file; repeat to compare layouts as tabs "
+        help="layout JSON file; repeat, oldest first, for a history view "
         "(default: the live Launchpad database)",
     )
     ap.add_argument("--out", "-o", required=True, help="HTML file to write")

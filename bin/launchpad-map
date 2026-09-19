@@ -10,7 +10,8 @@ usage() {
 launchpad-map — inspect and visualise the macOS Launchpad layout
 
 USAGE
-  launchpad-map dump   [--out FILE] [--title TEXT] [--db PATH]
+  launchpad-map dump   [--out FILE] [--title TEXT] [--date YYYY-MM-DD] [--db PATH] [--save]
+  launchpad-map history [--out FILE] [--open]
   launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
@@ -23,15 +24,21 @@ COMMANDS
 
   render   Turn one or more layout JSON files into a single self-contained
            HTML page that looks like Launchpad. Icons are embedded as data
-           URIs, so the file works offline. Pass --layout twice to get tabs
-           for comparing a current layout against a proposed one. With no
-           --layout, the live database is rendered.
+           URIs, so the file works offline. Pass --layout more than once,
+           oldest first, for a history view that marks what moved, what is
+           new and what was uninstalled between snapshots. With no --layout,
+           the live database is rendered.
 
   open     Render to a temporary file and open it in the default browser.
 
+  history  Render every snapshot in layouts/, oldest first and drafts last,
+           to launchpad-history.html in the repo. `dump --save` adds a
+           snapshot by hand; `write` adds one before and after each change.
+
   write    Apply a layout to the live Launchpad database. Backs the database
            up first, applies everything in one transaction, then restarts the
-           Dock. Use --dry-run to see the report without writing.
+           Dock. Saves a snapshot to the history before and after. Use
+           --dry-run to see the report without writing.
 
 EXAMPLES
   launchpad-map dump --out layouts/current.json
@@ -49,6 +56,7 @@ case "${1-}" in
   dump)   shift; exec python3 "$LIB/dump.py" "$@" ;;
   render) shift; exec python3 "$LIB/render.py" "$@" ;;
   write)  shift; exec python3 "$LIB/write.py" "$@" ;;
+  history) shift; exec python3 "$LIB/history.py" "$@" ;;
   open)
     shift
     out="$(mktemp -t launchpad-map).html"

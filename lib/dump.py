@@ -6,6 +6,7 @@ hand-editable:
 
     {
       "title": "...",
+      "date": "2026-08-10",
       "pages": [
         ["Google Chrome", {"folder": "Media", "apps": ["VLC", "GIMP"]}]
       ]
@@ -17,6 +18,7 @@ has to carry bundle ids.
 """
 
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -92,6 +94,14 @@ def read_layout(conn) -> list:
     return pages
 
 
+def snapshot_date(args) -> str:
+    if args.date:
+        return args.date
+    if args.db:
+        return datetime.date.fromtimestamp(os.path.getmtime(args.db)).isoformat()
+    return datetime.date.today().isoformat()
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(
         prog="launchpad-map dump", description=__doc__,
@@ -99,7 +109,18 @@ def main() -> int:
     ap.add_argument("--out", "-o", help="write here instead of stdout")
     ap.add_argument("--title", default="Current Launchpad layout")
     ap.add_argument("--db", help="database to read (default: the live one)")
+    ap.add_argument("--date", help="snapshot date for the history view (default: "
+                    "today, or the file date of --db)")
+    ap.add_argument("--save", action="store_true",
+                    help="add the live layout to the history in layouts/ "
+                    "(titled by --title)")
     args = ap.parse_args()
+
+    if args.save:
+        import history
+        title = args.title if args.title != "Current Launchpad layout" else "Live layout"
+        print(history.save_snapshot(title, args.db))
+        return 0
 
     path = args.db or db_path()
     if not os.path.exists(path):
@@ -107,7 +128,8 @@ def main() -> int:
 
     conn, tmp = open_snapshot(path)
     try:
-        doc = {"title": args.title, "pages": read_layout(conn)}
+        doc = {"title": args.title, "date": snapshot_date(args),
+               "pages": read_layout(conn)}
     finally:
         conn.close()
         shutil.rmtree(tmp, ignore_errors=True)
