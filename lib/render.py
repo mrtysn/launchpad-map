@@ -216,7 +216,6 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .chip.gone i { background: var(--gone); }
 
 #digest { max-width: 76ch; }
-.note { margin: 18px 0 0; font-size: 14px; line-height: 1.55; color: var(--ink); }
 #digest dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px;
   margin: 16px 0 0; font-size: 12.5px; }
 #digest dt { color: var(--dim); }
@@ -308,7 +307,7 @@ const D = JSON.parse(document.getElementById('data').textContent);
 const S = D.snapshots, ICON = D.icons, PAGE = D.pageSize;
 // Open on the newest snapshot, compared with the one before it: the live
 // layout against its proposal, when there is one.
-let cur = S.length - 1, base = S.length - 2, baseAuto = true, filter = null, query = '';
+let cur = S.length - 1, base = S.length - 2, filter = null, query = '';
 
 const $ = s => document.querySelector(s);
 function el(tag, cls, text) {
@@ -392,8 +391,6 @@ function folderIsNew(name) {
 function drawDigest() {
   const box = $('#digest');
   box.replaceChildren();
-  const note = S[cur].note;
-  if (note) box.append(el('p', 'note', note));
   if (base < 0) return;
   const map = folderMap();
   const folders = s => s.pages.flat().filter(x => x.kind === 'folder').map(x => x.title);
@@ -606,15 +603,16 @@ function drawTrail() {
 }
 
 function draw() { drawRail(); drawHead(); drawDigest(); drawPages(); drawTrail(); }
+// Stepping through the timeline always compares with the snapshot before;
+// a pick from "Changes since" holds only until the next step.
 function select(i) {
   cur = i;
-  if (baseAuto) base = i - 1;
-  if (base === cur) base = -1;
+  base = i - 1;
   filter = null;
   draw();
 }
 
-$('#base').addEventListener('change', e => { base = +e.target.value; baseAuto = false; filter = null; draw(); holdHead(); });
+$('#base').addEventListener('change', e => { base = +e.target.value; filter = null; draw(); holdHead(); });
 document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () => {
   if (c.dataset.k === 'gone') { $('#gone').scrollIntoView({ behavior: 'smooth' }); return; }
   filter = filter === c.dataset.k ? null : c.dataset.k;
@@ -637,7 +635,7 @@ function holdHead() {
   head.style.minHeight = '';
   let tallest = 0;
   S.forEach((_, i) => {
-    cur = i; base = baseAuto ? i - 1 : (was[1] === i ? -1 : was[1]);
+    cur = i; base = i - 1;
     drawHead(); drawDigest();
     tallest = Math.max(tallest, head.offsetHeight);
   });
