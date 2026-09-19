@@ -6,7 +6,7 @@
     },
     "Mullvad VPN": {
       "show": false,
-      "reason": "VPN or network identity"
+      "reason": "VPN"
     }
   }
 }

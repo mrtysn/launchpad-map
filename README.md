@@ -41,6 +41,10 @@ a new install never appears publicly until you review it; the history view
 counts those as "not reviewed". The public page carries no approvals and no
 reasons, only the apps it shows.
 
+To review, switch the history view to **Showcase**: every app is marked shown,
+hidden (with its reason) or not reviewed, and each folder says how many of its
+apps are hidden.
+
 ## The layout format
 
 `dump` emits a document that is meant to be edited by hand. Apps are named by

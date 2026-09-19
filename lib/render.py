@@ -245,6 +245,13 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .chip.moved i { background: var(--moved); } .chip.new i { background: var(--new); }
 .chip.gone i { background: var(--gone); }
 .chip.unreviewed i { background: var(--dim); }
+.chip.shown i { background: var(--ink); }
+.toggle { appearance: none; cursor: pointer; margin-left: auto; border: 1px solid var(--line);
+  background: none; border-radius: 8px; padding: 5px 12px; }
+.toggle[aria-pressed="true"] { background: var(--ink); color: #141b2b; border-color: transparent; }
+.no .mark { background: var(--gone); } .no .why { color: var(--gone); }
+.no .ic { filter: grayscale(1); opacity: .45; }
+.unrev .mark { background: var(--dim); } .unrev .why { color: var(--dim); }
 .compare[hidden] { display: none; }
 
 /* Every page on screen at once, left to right, as Launchpad orders them. */
@@ -347,6 +354,18 @@ function when(s) { return s.date ? fmtDate(s.date) + (s.time ? ', ' + s.time : '
 // Snapshots are named by when they were taken; a draft is the one proposal.
 // An app the showcase approvals do not mention yet; hidden from the showcase.
 function unreviewed(app) { return !!D.review && !(app in D.review); }
+// Showcase view: marks each app shown, hidden (with the reason) or not reviewed,
+// in place of the changes since the snapshot before.
+let sc = false;
+try { sc = !!D.review && localStorage.getItem('launchpad-map-showcase') === '1'; } catch (e) {}
+function showcaseStatus(app) {
+  const r = D.review[app];
+  if (!r) return { k: 'unrev' };
+  return r[0] ? null : { k: 'no', reason: r[1] };
+}
+function caption(st) {
+  return { new: 'new', moved: 'from ' + st.from, no: st.reason || 'hidden', unrev: 'not reviewed' }[st.k];
+}
 function label(s) { if (D.public) return 'Launchpad'; return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
 function fmtDate(d) {
   if (!d) return '';
@@ -388,6 +407,7 @@ function folderMap() {
   return map;
 }
 function status(app) {
+  if (sc) return showcaseStatus(app);
   if (base < 0) return null;
   const b = locs(S[base]).get(app);
   if (!b) return { k: 'new' };
@@ -451,6 +471,7 @@ function matches(app) {
   const st = status(app);
   let ok = !filter || (st && st.k === filter);
   if (filter === 'unreviewed') ok = unreviewed(app);
+  if (filter === 'ok') ok = !st;
   if (filter === 'dissolved') {
     const b = locs(S[base]).get(app);
     ok = !!(b && b.folder && folderChanges().dissolved.includes(b.folder));
@@ -471,7 +492,7 @@ function appCell(t, withStatus = true) {
   if (st) w.append(el('span', 'mark'));
   const lb = el('div', 'label', t); lb.title = t;
   c.append(w, lb);
-  if (st) { const y = el('div', 'why', st.k === 'new' ? 'new' : 'from ' + st.from); y.title = y.textContent; c.append(y); }
+  if (st) { const y = el('div', 'why', caption(st)); y.title = y.textContent; c.append(y); }
   if (narrowing() && withStatus) c.classList.add(matches(t) ? 'hit' : 'dim');
   return c;
 }
@@ -494,8 +515,13 @@ function folderCell(f) {
   if (from) parts.push('from ' + from);
   if (!fresh && moved) parts.push(moved + ' moved in');
   if (!fresh && added) parts.push(added + ' new');
-  const why = parts.join(', ');
-  if (why) { b.classList.add(fresh || (!moved && !from) ? 'new' : 'moved'); w.append(el('span', 'mark')); }
+  let why = parts.join(', '), kind = fresh || (!moved && !from) ? 'new' : 'moved';
+  if (sc) {
+    const no = sts.filter(x => x.k === 'no').length, un = sts.filter(x => x.k === 'unrev').length;
+    why = [no && no + ' hidden', un && un + ' not reviewed'].filter(Boolean).join(', ');
+    kind = no ? 'no' : 'unrev';
+  }
+  if (why) { b.classList.add(kind); w.append(el('span', 'mark')); }
   const lb = el('div', 'label', f.title); lb.title = f.title;
   b.append(w, lb,
     el('span', 'count' + (pages > 1 ? ' over' : ''), f.apps.length + (pages > 1 ? ' apps, ' + pages + ' pages' : ' apps')));
@@ -607,12 +633,23 @@ function drawHead() {
     created: fc.created.join(', '),
     dissolved: fc.dissolved.join(', '),
   };
+  if (sc) {
+    const all = [...locs(s).keys()], st = all.map(showcaseStatus);
+    Object.assign(counts, { ok: st.filter(x => !x).length, no: st.filter(x => x && x.k === 'no').length,
+      unrev: st.filter(x => x && x.k === 'unrev').length });
+  }
+  Object.assign(text, { ok: n => n + ' shown', no: n => n + ' hidden', unrev: n => n + ' not reviewed' });
+  const scKeys = ['ok', 'no', 'unrev'];
+  const sw = $('#sc');
+  if (sw) sw.setAttribute('aria-pressed', String(sc));
+  $('label[for="base"]').hidden = sel.hidden = sc;
   document.querySelectorAll('.chip').forEach(c => {
     const k = c.dataset.k;
+    if (sc !== scKeys.includes(k)) { c.hidden = true; return; }
     c.lastChild.textContent = text[k](counts[k]);
     c.title = tips[k] || '';
     c.setAttribute('aria-pressed', String(filter === k));
-    c.hidden = !counts[k] || (base < 0 && k !== 'unreviewed');
+    c.hidden = !counts[k] || (base < 0 && k !== 'unreviewed' && !sc);
   });
 }
 
@@ -679,6 +716,14 @@ document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () =
   filter = filter === c.dataset.k ? null : c.dataset.k;
   drawHead(); drawPages();
 }));
+if ($('#sc')) {
+  if (!D.review) $('#sc').remove();
+  else $('#sc').addEventListener('click', () => {
+    sc = !sc; filter = null;
+    try { localStorage.setItem('launchpad-map-showcase', sc ? '1' : '0'); } catch (e) {}
+    draw();
+  });
+}
 $('#q').addEventListener('input', e => { query = e.target.value.trim().toLowerCase(); drawPages(); drawTrail(); });
 $('#q').addEventListener('keydown', e => { if (e.key === 'Escape') { e.target.value = ''; query = ''; drawPages(); drawTrail(); } });
 $('#folder').addEventListener('click', e => { if (e.target.id === 'folder') e.target.close(); });
@@ -721,7 +766,7 @@ def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
         # Only the approved/hidden flags reach the page; reasons stay local.
         # The public page gets no approvals at all: they name the hidden apps.
         "review": None if review is None or public
-        else {a: bool(v.get("show")) for a, v in review.items()},
+        else {a: [bool(v.get("show")), v.get("reason", "")] for a, v in review.items()},
         "icons": by_title,
         "snapshots": [
             {k: layout[k] for k in ("title", "date", "time", "draft", "note", "pages")} for layout in layouts
@@ -754,6 +799,10 @@ def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
     <button class="chip gone" type="button" data-k="dissolved"><i></i><span></span></button>
     <button class="chip new" type="button" data-k="new"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="gone"><i></i><span></span></button>
+    <button class="chip shown" type="button" data-k="ok"><i></i><span></span></button>
+    <button class="chip gone" type="button" data-k="no"><i></i><span></span></button>
+    <button class="chip unreviewed" type="button" data-k="unrev"><i></i><span></span></button>
+    <button class="toggle" type="button" id="sc" aria-pressed="false">Showcase</button>
     <button class="chip unreviewed" type="button" data-k="unreviewed" title="Not in the showcase approvals yet, so hidden from the showcase"><i></i><span></span></button>
   </div>
   </header>
