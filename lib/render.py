@@ -215,11 +215,6 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .chip.moved i { background: var(--moved); } .chip.new i { background: var(--new); }
 .chip.gone i { background: var(--gone); }
 
-#digest { max-width: 76ch; }
-#digest dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px;
-  margin: 16px 0 0; font-size: 12.5px; }
-#digest dt { color: var(--dim); }
-#digest dd { margin: 0; }
 /* Every page on screen at once, left to right, as Launchpad orders them. */
 #pages { display: flex; gap: 20px; overflow-x: auto; margin-top: 30px; padding-bottom: 8px; }
 .page { flex: 0 0 auto;
@@ -388,29 +383,30 @@ function folderIsNew(name) {
   return !before && !Object.values(folderMap()).includes(name);
 }
 
-function drawDigest() {
-  const box = $('#digest');
-  box.replaceChildren();
-  if (base < 0) return;
+// How folders changed between the base snapshot and this one.
+function folderChanges() {
+  const none = { renamed: [], merged: [], created: [], dissolved: [] };
+  if (base < 0) return none;
   const map = folderMap();
   const folders = s => s.pages.flat().filter(x => x.kind === 'folder').map(x => x.title);
   const before = folders(S[base]), after = folders(S[cur]);
   const kept = new Set(Object.values(map));
   const into = {};
   Object.entries(map).forEach(([b, c]) => (into[c] = into[c] || []).push(b));
-  const merged = Object.entries(into).filter(([c, bs]) => bs.length > 1);
-  const renamed = Object.entries(map).filter(([b, c]) => b !== c && into[c].length === 1);
-  const created = after.filter(f => !kept.has(f) && !before.includes(f));
-  const dissolved = before.filter(f => !(f in map) && !after.includes(f));
-  const rows = [];
-  if (renamed.length) rows.push(['Renamed', renamed.map(([b, c]) => b + ' to ' + c).join(', ')]);
-  if (merged.length) rows.push(['Merged', merged.map(([c, bs]) => bs.join(' and ') + ' into ' + c).join(', ')]);
-  if (created.length) rows.push(['New folders', created.join(', ')]);
-  if (dissolved.length) rows.push(['Broken up', dissolved.join(', ')]);
-  if (!rows.length) return;
-  const dl = el('dl');
-  rows.forEach(([k, v]) => dl.append(el('dt', null, k), el('dd', null, v)));
-  box.append(dl);
+  return {
+    renamed: Object.entries(map).filter(([b, c]) => b !== c && into[c].length === 1),
+    merged: Object.entries(into).filter(([c, bs]) => bs.length > 1),
+    created: after.filter(f => !kept.has(f) && !before.includes(f)),
+    dissolved: before.filter(f => !(f in map) && !after.includes(f)),
+  };
+}
+// Which folders a folder-level chip highlights, by their current name.
+function folderHits(k) {
+  const c = folderChanges();
+  if (k === 'renamed') return c.renamed.map(([, n]) => n);
+  if (k === 'merged') return c.merged.map(([n]) => n);
+  if (k === 'created') return c.created;
+  return [];
 }
 function gone() {
   if (base < 0) return [];
@@ -419,7 +415,12 @@ function gone() {
 }
 function matches(app) {
   const st = status(app);
-  return (!filter || (st && st.k === filter)) && (!query || app.toLowerCase().includes(query));
+  let ok = !filter || (st && st.k === filter);
+  if (filter === 'dissolved') {
+    const b = locs(S[base]).get(app);
+    ok = !!(b && b.folder && folderChanges().dissolved.includes(b.folder));
+  }
+  return ok && (!query || app.toLowerCase().includes(query));
 }
 const narrowing = () => !!(filter || query);
 
@@ -450,7 +451,10 @@ function folderCell(f) {
   const pages = Math.ceil(f.apps.length / PAGE) || 1;
   const moved = sts.filter(x => x.k === 'moved').length, added = sts.length - moved;
   const from = fresh ? null : folderFrom(f.title, folderPage(f));
-  const parts = [];
+  const parts = [], fc = folderChanges();
+  const was = fc.renamed.filter(([, n]) => n === f.title).map(([o]) => o)
+    .concat(...fc.merged.filter(([n]) => n === f.title).map(([, bs]) => bs));
+  if (was.length) parts.push('was ' + was.join(' and '));
   if (fresh) parts.push('new folder');
   if (from) parts.push('from ' + from);
   if (!fresh && moved) parts.push(moved + ' moved in');
@@ -462,7 +466,8 @@ function folderCell(f) {
     el('span', 'count' + (pages > 1 ? ' over' : ''), f.apps.length + (pages > 1 ? ' apps, ' + pages + ' pages' : ' apps')));
   if (why) { const y = el('div', 'why', why); y.title = why; b.append(y); }
   b.setAttribute('aria-label', f.title + ', folder of ' + f.apps.length + ' apps' + (why ? ', ' + why : ''));
-  const self = filter === 'folders' && from && (!query || f.title.toLowerCase().includes(query));
+  const self = ((filter === 'folders' && from) || folderHits(filter).includes(f.title)) &&
+    (!query || f.title.toLowerCase().includes(query));
   if (narrowing()) b.classList.add(self || f.apps.some(matches) ? 'hit' : 'dim');
   b.addEventListener('click', () => openFolder(f));
   return b;
@@ -545,11 +550,30 @@ function drawHead() {
 
   const all = [...locs(s).keys()].map(status).filter(Boolean);
   const movedFolders = s.pages.flat().filter(x => x.kind === 'folder' && !folderIsNew(x.title) && folderFrom(x.title, folderPage(x))).length;
-  const counts = { moved: all.filter(x => x.k === 'moved').length, folders: movedFolders, new: all.filter(x => x.k === 'new').length, gone: gone().length };
-  const names = { moved: 'apps moved', folders: 'folders moved', new: 'new', gone: 'uninstalled' };
+  const fc = folderChanges();
+  const counts = { moved: all.filter(x => x.k === 'moved').length, folders: movedFolders,
+    renamed: fc.renamed.length, merged: fc.merged.length, created: fc.created.length,
+    dissolved: fc.dissolved.length, new: all.filter(x => x.k === 'new').length, gone: gone().length };
+  const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
+  const text = {
+    moved: n => plural(n, 'app moved', 'apps moved'),
+    folders: n => plural(n, 'folder moved', 'folders moved'),
+    renamed: n => plural(n, 'folder renamed', 'folders renamed'),
+    merged: n => plural(n, 'folder merged', 'folders merged'),
+    created: n => plural(n, 'new folder', 'new folders'),
+    dissolved: n => plural(n, 'folder broken up', 'folders broken up'),
+    new: n => n + ' new', gone: n => n + ' uninstalled',
+  };
+  const tips = {
+    renamed: fc.renamed.map(([b, c]) => b + ' to ' + c).join(', '),
+    merged: fc.merged.map(([c, bs]) => bs.join(' and ') + ' into ' + c).join(', '),
+    created: fc.created.join(', '),
+    dissolved: fc.dissolved.join(', '),
+  };
   document.querySelectorAll('.chip').forEach(c => {
     const k = c.dataset.k;
-    c.lastChild.textContent = counts[k] + ' ' + names[k];
+    c.lastChild.textContent = text[k](counts[k]);
+    c.title = tips[k] || '';
     c.setAttribute('aria-pressed', String(filter === k));
     c.hidden = base < 0 || !counts[k];
   });
@@ -602,7 +626,7 @@ function drawTrail() {
   t.hidden = false;
 }
 
-function draw() { drawRail(); drawHead(); drawDigest(); drawPages(); drawTrail(); }
+function draw() { drawRail(); drawHead(); drawPages(); drawTrail(); }
 // Stepping through the timeline always compares with the snapshot before;
 // a pick from "Changes since" holds only until the next step.
 function select(i) {
@@ -636,11 +660,11 @@ function holdHead() {
   let tallest = 0;
   S.forEach((_, i) => {
     cur = i; base = i - 1;
-    drawHead(); drawDigest();
+    drawHead();
     tallest = Math.max(tallest, head.offsetHeight);
   });
   [cur, base] = was;
-  drawHead(); drawDigest();
+  drawHead();
   head.style.minHeight = tallest + 'px';
 }
 draw();
@@ -681,10 +705,13 @@ def render(layouts, icons, ids, page_size) -> str:
     <label for="base">Changes since</label> <select id="base"></select>
     <button class="chip moved" type="button" data-k="moved"><i></i><span></span></button>
     <button class="chip moved" type="button" data-k="folders"><i></i><span></span></button>
+    <button class="chip moved" type="button" data-k="renamed"><i></i><span></span></button>
+    <button class="chip moved" type="button" data-k="merged"><i></i><span></span></button>
+    <button class="chip new" type="button" data-k="created"><i></i><span></span></button>
+    <button class="chip gone" type="button" data-k="dissolved"><i></i><span></span></button>
     <button class="chip new" type="button" data-k="new"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="gone"><i></i><span></span></button>
   </div>
-  <div id="digest"></div>
   </header>
   <div id="pages"></div>
   <div id="gone"></div>
