@@ -223,14 +223,14 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 #digest dd { margin: 0; }
 /* Every page on screen at once, left to right, as Launchpad orders them. */
 #pages { display: flex; gap: 20px; overflow-x: auto; margin-top: 30px; padding-bottom: 8px; }
-.page { flex: 1 1 0; min-width: 460px; container-type: inline-size;
-  border: 1px solid var(--line); border-radius: 18px; padding: 16px 16px 20px;
+.page { flex: 0 0 auto;
+  border: 1px solid var(--line); border-radius: 18px; padding: 16px 14px 20px;
   background: rgba(255,255,255,.025); }
-.page .grid { grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 12px 4px;
-  /* Always the full 7x5 of a Launchpad page, every row the same height, so a
-     panel is the same size whichever snapshot is on screen. */
-  grid-template-rows: repeat(5, calc(min(var(--icon), 10.5cqi) + 56px)); }
-.page .iw { width: min(var(--icon), 10.5cqi); height: min(var(--icon), 10.5cqi); }
+.page .grid { --col: 70px; --icon: 54px; gap: 12px 2px;
+  /* Always the full 7x5 of a Launchpad page at fixed cell sizes, so a panel and
+     every icon in it look the same whichever snapshot is on screen. */
+  grid-template-columns: repeat(7, var(--col));
+  grid-template-rows: repeat(5, calc(var(--icon) + 56px)); }
 .page h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600; }
 .page h2 span { font-weight: 400; color: var(--dim); margin-left: 8px; }
 .page h2 .over { color: var(--warn); }
