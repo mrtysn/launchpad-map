@@ -16,6 +16,7 @@ USAGE
   launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
+  launchpad-map inventory INVENTORY.md [--out FILE] [--label TEXT] [--no-icons]
   launchpad-map --help
 
 COMMANDS
@@ -45,6 +46,12 @@ COMMANDS
            Dock. Adds a snapshot to the history. Use
            --dry-run to see the report without writing.
 
+  inventory
+           Cross-reference a saved app inventory (Mac App Store / Homebrew
+           casks / /Applications, as dumped during a machine offboarding)
+           against this machine, and write a self-contained HTML report with
+           real app icons. Read-only.
+
 EXAMPLES
   launchpad-map dump --out layouts/current.json
   launchpad-map render --layout layouts/current.json \
@@ -62,6 +69,7 @@ case "${1-}" in
   render) shift; exec python3 "$LIB/render.py" "$@" ;;
   write)  shift; exec python3 "$LIB/write.py" "$@" ;;
   history) shift; exec python3 "$LIB/history.py" "$@" ;;
+  inventory) shift; exec python3 "$LIB/inventory.py" "$@" ;;
   showcase) exec python3 "$LIB/history.py" "$@" ;;
   open)
     shift

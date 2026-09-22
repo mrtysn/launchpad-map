@@ -106,6 +106,39 @@ checkpoints the WAL before letting the Dock restart.
 Backups land in `~/Library/Application Support/launchpad-backups/` by default,
 and the path is printed on every run.
 
+## App inventory
+
+`launchpad-map inventory INVENTORY.md` cross-references a saved app inventory
+against this machine and writes a self-contained HTML report — unrelated to
+Launchpad's own layout, but it shares this repo's icon pipeline, hence
+living here. The inventory is the markdown produced during a machine
+offboarding, with three sections:
+
+```
+## Mac App Store (mas list) ...
+1234567890  App Name    (1.2.3)
+## Homebrew casks (brew list --cask) ...
+cask-one cask-two ...
+## /Applications (full)
+Some App.app
+```
+
+Each entry is marked **on both**, **not here** (in the inventory but missing
+locally) or **new here** (installed locally since the inventory was taken).
+Local state — installed casks, `mas list`, `/Applications` — is collected at
+run time; icons come from `lib/icon-export.swift`, the same helper `render`
+uses, resolving each local bundle's `CFBundleIdentifier` from its
+`Info.plist` (via `plutil`) and falling back to icon-export's own by-name
+filesystem search for bundles that carry no identifier at all (Platypus-style
+launcher wrappers, or a Catalyst app whose real bundle sits under `Wrapper/`).
+
+```
+launchpad-map inventory offboarding-inventory.md --out /tmp/report.html
+```
+
+`--label` names the inventory's machine in the report (default: the file's
+stem); `--no-icons` skips icon extraction for a much smaller file. Read-only.
+
 ## Requirements
 
 macOS with the Swift toolchain (`/usr/bin/swift`, present with the Command Line
