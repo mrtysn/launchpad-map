@@ -73,7 +73,7 @@ case "${1-}" in
   showcase) exec python3 "$LIB/history.py" "$@" ;;
   open)
     shift
-    out="$(mktemp -t launchpad-map).html"
+    out="$(mktemp -t launchpad-map.XXXXXX).html"
     python3 "$LIB/render.py" --out "$out" "$@"
     exec open "$out"
     ;;

@@ -270,6 +270,11 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .grid { display: grid; grid-template-columns: repeat(7, var(--tile)); gap: 22px 14px; }
 
 .cell { text-align: center; position: relative; transition: opacity .2s; }
+.cell.linkable .iw { cursor: pointer; }
+.storemenu { position: fixed; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column;
+  min-width: 110px; padding: 4px; border-radius: 10px; background: #2a2a2e; color: #eee; box-shadow: 0 6px 24px #0008; font-size: 12px; }
+.storemenu a { color: inherit; text-decoration: none; padding: 6px 10px; border-radius: 6px; white-space: nowrap; }
+.storemenu a:hover { background: #ffffff1f; }
 button.cell { appearance: none; border: 0; background: none; padding: 0; cursor: pointer;
   display: flex; flex-direction: column; align-items: center; }
 .cell { align-self: start; }
@@ -484,6 +489,28 @@ function icon(t) {
   if (ICON[t]) { const i = el('img', 'ic'); i.src = ICON[t]; i.alt = ''; return i; }
   return el('div', 'ic ph', (t[0] || '?').toUpperCase());
 }
+let menuEl = null;
+function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+function storeMenu(anchor, name) {
+  const same = menuEl && menuEl.anchor === anchor;
+  closeMenu();
+  if (same) return;
+  const m = el('div', 'storemenu');
+  const q = encodeURIComponent(name);
+  [['Google Play', 'https://play.google.com/store/search?c=apps&q=' + q],
+   ['F-Droid', 'https://search.f-droid.org/?lang=en&q=' + q]].forEach(([l, u]) => {
+    const a = el('a', null, l); a.href = u; a.target = '_blank'; a.rel = 'noopener'; m.append(a);
+  });
+  m.anchor = anchor;
+  const r = anchor.getBoundingClientRect();
+  m.style.left = (r.left + r.width / 2) + 'px';
+  m.style.top = (r.bottom + 4) + 'px';
+  (document.querySelector('dialog[open]') || document.body).append(m);
+  menuEl = m;
+}
+document.addEventListener('click', closeMenu);
+document.addEventListener('scroll', closeMenu, true);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
 function appCell(t, withStatus = true) {
   const st = withStatus ? status(t) : null;
   const c = el('div', 'cell' + (st ? ' ' + st.k : ''));
@@ -492,6 +519,10 @@ function appCell(t, withStatus = true) {
   if (st) w.append(el('span', 'mark'));
   const lb = el('div', 'label', t); lb.title = t;
   c.append(w, lb);
+  if (S[cur].grid) {
+    c.classList.add('linkable');
+    w.addEventListener('click', e => { e.stopPropagation(); storeMenu(w, plain(t)); });
+  }
   if (st) { const y = el('div', 'why', caption(st)); y.title = y.textContent; c.append(y); }
   if (narrowing() && withStatus) c.classList.add(matches(t) ? 'hit' : 'dim');
   return c;
