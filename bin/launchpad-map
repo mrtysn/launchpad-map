@@ -17,7 +17,7 @@ USAGE
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
   launchpad-map inventory INVENTORY.md [--out FILE] [--label TEXT] [--no-icons]
-  launchpad-map phone dump [--save] [--out FILE] [--serial SERIAL] [--note TEXT]
+  launchpad-map phone dump [--save] [--out FILE] [--serial SERIAL] [--note TEXT] [--pages-only]
   launchpad-map phone history [--out FILE] [--open]
   launchpad-map phone write PROPOSAL [--dry-run] [--from SNAPSHOT] [--max-ops N]
   launchpad-map phone usage [--json] [--save] [--serial SERIAL]

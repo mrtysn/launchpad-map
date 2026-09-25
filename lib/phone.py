@@ -518,6 +518,9 @@ def main() -> int:
     ap.add_argument("--save", action="store_true", help="add the snapshot to layouts/phone/")
     ap.add_argument("--out", help="write the snapshot JSON here instead of stdout")
     ap.add_argument("--note", help="note to store with the snapshot")
+    ap.add_argument("--pages-only", action="store_true",
+                    help="read the pages but not the folders: a folder's apps are taken from the newest "
+                         "snapshot by its name (the same name, or the name with its emoji prefix stripped)")
     args = ap.parse_args()
 
     serial = pick_serial(args.serial)
@@ -533,7 +536,7 @@ def dump_to(args, serial) -> int:
     model = (phone.adb("shell", "getprop", "ro.product.marketname").strip()
              or phone.adb("shell", "getprop", "ro.product.model").strip())
     walk = Walk(phone)
-    pages, dock, g = collect(walk)
+    pages, dock, g = collect(walk, known_folders() if getattr(args, "pages_only", False) else None)
     phone.finish()
 
     specs = [u for _, u in dock]
@@ -628,8 +631,36 @@ def go_to(walk: Walk, target: int):
     die(f"could not reach page {target}")
 
 
-def collect(walk: Walk):
+def known_folders() -> dict:
+    """Folder name -> apps, from the newest snapshot, for a pages-only dump.
+    Keyed by the name as it is and by its ASCII part ('🎮 logic' answers to
+    'logic' and the other way round), so a rename by hand still matches."""
+    names = sorted(n for n in os.listdir(LAYOUTS) if re.match(r"\d{4}-\d{2}-\d{2}-\d{4}\.json$", n))
+    if not names:
+        die("--pages-only needs an earlier snapshot in layouts/phone/ to take the folders from")
+    with open(os.path.join(LAYOUTS, names[-1])) as fh:
+        doc = json.load(fh)
+    out = {}
+    for pg in doc["pages"]:
+        for it in pg:
+            if "folder" in it:
+                out[it["folder"]] = it["apps"]
+                out.setdefault("".join(ch for ch in it["folder"] if ch.isascii()).strip(), it["apps"])
+    return out
+
+
+def caption_of(scr: Screen, fb) -> str:
+    """The name under a folder icon: the short text inside its cell."""
+    for n in scr.launcher():
+        if n["cls"] == "TextView" and n["label"] and n["b"][3] - n["b"][1] < 100 and inside(n["b"], fb):
+            return n["label"]
+    return ""
+
+
+def collect(walk: Walk, folders_from: dict = None):
     """Walk every page; keep the icons on the entries for main() to file.
+    With `folders_from` (name -> apps) no folder is opened: its caption is
+    read from the page and its apps come from that map.
 
     A drop off adb re-reads the page it happened on, once the phone is back."""
     p, drops = walk.phone, 0
@@ -655,7 +686,13 @@ def collect(walk: Walk):
             if dock is None:
                 dock = d
             for fb in folders:
-                if str(fb) not in done:
+                if str(fb) not in done and folders_from is not None:
+                    name = caption_of(scr, fb)
+                    apps = folders_from.get(name) or folders_from.get("".join(ch for ch in name if ch.isascii()).strip())
+                    if apps is None:
+                        die(f"folder {name!r} on page {page_no} is not in the newest snapshot; run a full dump")
+                    done[str(fb)] = (name, [(a, None) for a in apps])
+                elif str(fb) not in done:
                     done[str(fb)] = walk.read_folder(fb, page_no, background)
                     save_progress(state())
                 title, apps = done[str(fb)]
