@@ -89,6 +89,13 @@ def normalize(doc: dict, page_size: int) -> dict:
                 )
             elif "app" in entry:
                 items.append({"kind": "app", "title": entry["app"]})
+            elif "widget" in entry:
+                items.append({"kind": "widget", "title": entry["widget"]})
+            else:
+                continue
+            if isinstance(entry, dict) and "at" in entry:  # a phone layout places items by cell
+                items[-1]["at"] = entry["at"]
+                items[-1]["span"] = entry.get("span", [1, 1])
         if items:  # the database keeps empty pages around; Launchpad never shows them
             pages.append(items)
     return {
@@ -98,7 +105,32 @@ def normalize(doc: dict, page_size: int) -> dict:
         "draft": bool(doc.get("draft")),
         "note": doc.get("note"),
         "pages": pages,
+        "grid": doc.get("grid"),
+        "dock": doc.get("dock", []),
     }
+
+
+# A title that appears more than once (two shortcuts to one app, or two apps
+# with the same name) gets a suffix per occurrence, counted in page order and
+# then the dock, so the Nth one is matched with the Nth one in another snapshot.
+DUP = "\u00a0#"
+
+
+def key_duplicates(layout: dict) -> dict:
+    seen = {}
+
+    def key(title):
+        seen[title] = seen.get(title, 0) + 1
+        return title if seen[title] == 1 else f"{title}{DUP}{seen[title]}"
+
+    for page in layout["pages"]:
+        for item in page:
+            if item["kind"] == "app":
+                item["title"] = key(item["title"])
+            elif item["kind"] == "folder":
+                item["apps"] = [key(a) for a in item["apps"]]
+    layout["dock"] = [key(a) for a in layout.get("dock", [])]
+    return layout
 
 
 def load_review(path):
@@ -135,8 +167,9 @@ def collect_titles(layouts) -> set:
             for item in page:
                 if item["kind"] == "app":
                     titles.add(item["title"])
-                else:
+                elif item["kind"] == "folder":
                     titles.update(item["apps"])
+        titles.update(layout.get("dock", []))
     return titles
 
 
@@ -275,6 +308,8 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
   min-width: 110px; padding: 4px; border-radius: 10px; background: #2a2a2e; color: #eee; box-shadow: 0 6px 24px #0008; font-size: 12px; }
 .storemenu a { color: inherit; text-decoration: none; padding: 6px 10px; border-radius: 6px; white-space: nowrap; }
 .storemenu a:hover { background: #ffffff1f; }
+.storemenu .use { padding: 6px 10px 2px; font-size: 11.5px; color: var(--faint); white-space: nowrap; }
+.chip.idle i { background: var(--warn); }
 button.cell { appearance: none; border: 0; background: none; padding: 0; cursor: pointer;
   display: flex; flex-direction: column; align-items: center; }
 .cell { align-self: start; }
@@ -299,6 +334,14 @@ button.cell { appearance: none; border: 0; background: none; padding: 0; cursor:
 .folder img { width: 100%; display: block; }
 .count { display: block; font-size: 10.5px; color: var(--faint); margin-top: 1px; }
 .count.over { color: var(--warn); font-weight: 600; }
+
+/* A phone page places each item in its own cell; widgets span several. */
+.phone .ic { border-radius: 24%; }
+.widget { border-radius: 20px; background: rgba(255,255,255,.08); border: 1px dashed var(--line);
+  display: flex; align-items: center; justify-content: center; padding: 8px; text-align: center;
+  color: var(--dim); font-size: 11.5px; margin: 0 4px 22px; }
+.page.dock { margin-top: 18px; width: fit-content; }
+.page.dock .grid { grid-template-rows: auto; }
 
 .gone-row { margin-top: 44px; padding-top: 22px; border-top: 1px dashed var(--line); }
 .gone-row h2 { margin: 0 0 16px; font-size: 13px; font-weight: 600; color: var(--gone); }
@@ -343,7 +386,20 @@ dialog::backdrop { background: rgba(8,10,16,.6); backdrop-filter: blur(14px); }
 
 JS = r"""
 const D = JSON.parse(document.getElementById('data').textContent);
-const S = D.snapshots, ICON = D.icons, PAGE = D.pageSize;
+const S = D.snapshots, ICON = D.icons, U = D.usage || null;
+// Usage of an app as one line; null when there is no usage data at all.
+function usageLine(name) {
+  if (!U) return null;
+  const u = U[name];
+  if (!u || !u[5]) return 'no usage data (package unknown)';
+  if (!u[1]) return 'not launched this year';
+  return u[0] + ' min, ' + u[1] + ' launches this year' + (u[2] || u[3] ? '; ' + u[2] + ' min this month' : '')
+    + (u[4] ? '; last ' + u[4] : '');
+}
+const idle = name => !!(U && U[name] && U[name][5] && !U[name][1]);
+// Apps per folder screen: Launchpad's page size, or the phone's folder grid.
+const fpage = s => s.grid ? s.grid.folder[0] * s.grid.folder[1] : D.pageSize;
+let PAGE = fpage(S[S.length - 1]);
 // Open on the newest snapshot, compared with the one before it: the live
 // layout against its proposal, when there is one.
 let cur = S.length - 1, base = S.length - 2, filter = null, query = '';
@@ -371,7 +427,7 @@ function showcaseStatus(app) {
 function caption(st) {
   return { new: 'new', moved: 'from ' + st.from, no: st.reason || 'hidden', unrev: 'not reviewed' }[st.k];
 }
-function label(s) { if (D.public) return 'Launchpad'; return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
+function label(s) { if (D.public) return document.title; return s.draft ? 'Proposal' : when(s) || s.title || 'Layout'; }
 function fmtDate(d) {
   if (!d) return '';
   const t = new Date(d + 'T12:00:00');
@@ -383,11 +439,12 @@ function locs(s) {
   const m = new Map();
   s.pages.forEach((p, pi) => p.forEach(it => {
     if (it.kind === 'app') m.set(it.title, { folder: null, page: pi });
-    else it.apps.forEach(a => m.set(a, { folder: it.title, page: pi }));
+    else if (it.kind === 'folder') it.apps.forEach(a => m.set(a, { folder: it.title, page: pi }));
   }));
+  (s.dock || []).forEach(a => m.set(a, { folder: null, page: -1 }));
   return (s._l = m);
 }
-function where(l) { return l.folder || 'Page ' + (l.page + 1); }
+function where(l) { return l.folder || (l.page < 0 ? 'Dock' : 'Page ' + (l.page + 1)); }
 
 // A folder counts as renamed, not dissolved, when at least half of its apps
 // went to one folder of another name; its apps then have not moved.
@@ -436,6 +493,21 @@ function folderFrom(name, page) {
 }
 function folderPage(f) { return S[cur].pages.findIndex(p => p.includes(f)); }
 
+// Apps that were in this folder (under any of its old names) in the base
+// snapshot and are somewhere else now.
+function movedOut(name) {
+  if (base < 0) return 0;
+  const map = folderMap();
+  const olds = new Set([name, ...Object.keys(map).filter(b => map[b] === name)]);
+  const now = locs(S[cur]);
+  let n = 0;
+  locs(S[base]).forEach((l, a) => {
+    const c = now.get(a);
+    if (l.folder && olds.has(l.folder) && c && c.folder !== name) n++;
+  });
+  return n;
+}
+
 function folderIsNew(name) {
   if (base < 0) return false;
   const before = S[base].pages.flat().some(x => x.kind === 'folder' && x.title === name);
@@ -477,6 +549,7 @@ function matches(app) {
   let ok = !filter || (st && st.k === filter);
   if (filter === 'unreviewed') ok = unreviewed(app);
   if (filter === 'ok') ok = !st;
+  if (filter === 'idle') ok = idle(app);
   if (filter === 'dissolved') {
     const b = locs(S[base]).get(app);
     ok = !!(b && b.folder && folderChanges().dissolved.includes(b.folder));
@@ -487,8 +560,10 @@ const narrowing = () => !!(filter || query);
 
 function icon(t) {
   if (ICON[t]) { const i = el('img', 'ic'); i.src = ICON[t]; i.alt = ''; return i; }
-  return el('div', 'ic ph', (t[0] || '?').toUpperCase());
+  return el('div', 'ic ph', (plain(t)[0] || '?').toUpperCase());
 }
+// The occurrence suffix a repeated title carries (see key_duplicates).
+const plain = t => t.replace(/\u00a0#\d+$/, '');
 let menuEl = null;
 function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
 function storeMenu(anchor, name) {
@@ -496,6 +571,8 @@ function storeMenu(anchor, name) {
   closeMenu();
   if (same) return;
   const m = el('div', 'storemenu');
+  const use = usageLine(name);
+  if (use) m.append(el('span', 'use', use));
   const q = encodeURIComponent(name);
   [['Google Play', 'https://play.google.com/store/search?c=apps&q=' + q],
    ['F-Droid', 'https://search.f-droid.org/?lang=en&q=' + q]].forEach(([l, u]) => {
@@ -517,7 +594,7 @@ function appCell(t, withStatus = true) {
   const w = el('div', 'iw');
   w.append(icon(t));
   if (st) w.append(el('span', 'mark'));
-  const lb = el('div', 'label', t); lb.title = t;
+  const lb = el('div', 'label', plain(t)); lb.title = plain(t);
   c.append(w, lb);
   if (S[cur].grid) {
     c.classList.add('linkable');
@@ -535,7 +612,8 @@ function folderCell(f) {
   w.append(tile);
   const sts = f.apps.map(status).filter(Boolean);
   const fresh = folderIsNew(f.title);
-  const pages = Math.ceil(f.apps.length / PAGE) || 1;
+  // Launchpad folders page; phone folders scroll, so only Launchpad warns.
+  const pages = S[cur].grid ? 1 : Math.ceil(f.apps.length / PAGE) || 1;
   const moved = sts.filter(x => x.k === 'moved').length, added = sts.length - moved;
   const from = fresh ? null : folderFrom(f.title, folderPage(f));
   const parts = [], fc = folderChanges();
@@ -544,9 +622,11 @@ function folderCell(f) {
   if (was.length) parts.push('was ' + was.join(' and '));
   if (fresh) parts.push('new folder');
   if (from) parts.push('from ' + from);
+  const out = fresh ? 0 : movedOut(f.title);
   if (!fresh && moved) parts.push(moved + ' moved in');
+  if (out) parts.push(out + ' moved out');
   if (!fresh && added) parts.push(added + ' new');
-  let why = parts.join(', '), kind = fresh || (!moved && !from) ? 'new' : 'moved';
+  let why = parts.join(', '), kind = fresh || (!moved && !out && !from) ? 'new' : 'moved';
   if (sc) {
     const no = sts.filter(x => x.k === 'no').length, un = sts.filter(x => x.k === 'unrev').length;
     why = [no && no + ' hidden', un && un + ' not reviewed'].filter(Boolean).join(', ');
@@ -574,11 +654,14 @@ function openFolder(f) {
   const moved = sts.filter(s => s.k === 'moved').length, added = sts.length - moved;
   let meta = f.apps.length + ' apps';
   if (moved) meta += ', ' + moved + ' moved in';
+  const out = folderIsNew(f.title) ? 0 : movedOut(f.title);
+  if (out) meta += ', ' + out + ' moved out';
   if (added) meta += ', ' + added + ' new';
   sh.append(x, el('h3', null, f.title), el('p', 'meta', meta));
   for (let i = 0; i < f.apps.length || i === 0; i += PAGE) {
     if (i) sh.append(el('hr'));
     const g = el('div', 'grid');
+    if (S[cur].grid) g.style.gridTemplateColumns = 'repeat(' + S[cur].grid.folder[0] + ', var(--tile))';
     f.apps.slice(i, i + PAGE).forEach(a => g.append(appCell(a)));
     sh.append(g);
   }
@@ -590,8 +673,8 @@ function openFolder(f) {
       const box = el('div', 'out');
       box.append(el('h4', null, 'Moved out'));
       const ul = el('ul');
-      out.forEach(([a]) => { const li = el('li', null, a + ' '); li.append(el('span', null, 'now in ' + where(now.get(a)))); ul.append(li); });
-      lost.forEach(([a]) => { const li = el('li', null, a + ' '); const s = el('span', null, 'uninstalled'); s.style.color = 'var(--gone)'; li.append(s); ul.append(li); });
+      out.forEach(([a]) => { const li = el('li', null, plain(a) + ' '); li.append(el('span', null, 'now in ' + where(now.get(a)))); ul.append(li); });
+      lost.forEach(([a]) => { const li = el('li', null, plain(a) + ' '); const s = el('span', null, 'uninstalled'); s.style.color = 'var(--gone)'; li.append(s); ul.append(li); });
       box.append(ul); sh.append(box);
     }
   }
@@ -647,7 +730,8 @@ function drawHead() {
   const counts = { moved: all.filter(x => x.k === 'moved').length, folders: movedFolders,
     renamed: fc.renamed.length, merged: fc.merged.length, created: fc.created.length,
     dissolved: fc.dissolved.length, new: all.filter(x => x.k === 'new').length, gone: gone().length,
-    unreviewed: [...locs(s).keys()].filter(unreviewed).length };
+    unreviewed: [...locs(s).keys()].filter(unreviewed).length,
+    idle: [...locs(s).keys()].filter(idle).length };
   const plural = (n, one, many) => n + ' ' + (n === 1 ? one : many);
   const text = {
     moved: n => plural(n, 'app moved', 'apps moved'),
@@ -656,7 +740,8 @@ function drawHead() {
     merged: n => plural(n, 'folder merged', 'folders merged'),
     created: n => plural(n, 'new folder', 'new folders'),
     dissolved: n => plural(n, 'folder broken up', 'folders broken up'),
-    new: n => n + ' new', gone: n => n + ' uninstalled', unreviewed: n => n + ' not reviewed',
+    new: n => n + ' new', gone: n => n + ' not seen', unreviewed: n => n + ' not reviewed',
+    idle: n => n + ' not launched this year',
   };
   const tips = {
     renamed: fc.renamed.map(([b, c]) => b + ' to ' + c).join(', '),
@@ -680,27 +765,52 @@ function drawHead() {
     c.lastChild.textContent = text[k](counts[k]);
     c.title = tips[k] || '';
     c.setAttribute('aria-pressed', String(filter === k));
-    c.hidden = !counts[k] || (base < 0 && k !== 'unreviewed' && !sc);
+    c.hidden = !counts[k] || (base < 0 && k !== 'unreviewed' && k !== 'idle' && !sc);
   });
 }
 
 function drawPages() {
   const m = $('#pages');
   m.replaceChildren();
-  S[cur].pages.forEach((p, pi) => {
+  document.querySelectorAll('.page.dock').forEach(d => d.remove());
+  const s = S[cur], G = s.grid;
+  PAGE = fpage(s);
+  document.body.classList.toggle('phone', !!G);
+  const place = (c, it) => {
+    if (!it.at) return c;
+    c.style.gridColumn = (it.at[0] + 1) + ' / span ' + it.span[0];
+    c.style.gridRow = (it.at[1] + 1) + ' / span ' + it.span[1];
+    return c;
+  };
+  const shape = g => {
+    if (!G) return g;
+    g.style.gridTemplateColumns = 'repeat(' + G.cols + ', var(--col))';
+    g.style.gridTemplateRows = 'repeat(' + G.rows + ', calc(var(--icon) + 56px))';
+    return g;
+  };
+  s.pages.forEach((p, pi) => {
     const sec = el('section', 'page');
     const h = el('h2', null, 'Page ' + (pi + 1));
-    h.append(el('span', p.length > PAGE ? 'over' : null, p.length + ' of ' + PAGE));
-    const g = el('div', 'grid');
-    p.forEach(it => g.append(it.kind === 'app' ? appCell(it.title) : folderCell(it)));
+    const cap = G ? G.cols * G.rows : D.pageSize;
+    const used = p.reduce((n, it) => n + (it.span ? it.span[0] * it.span[1] : 1), 0);
+    h.append(el('span', used > cap ? 'over' : null, used + ' of ' + cap));
+    const g = shape(el('div', 'grid'));
+    p.forEach(it => g.append(place(
+      it.kind === 'app' ? appCell(it.title) : it.kind === 'folder' ? folderCell(it) : el('div', 'widget', it.title), it)));
     sec.append(h, g); m.append(sec);
   });
+  if (s.dock && s.dock.length) {
+    const sec = el('section', 'page dock'), g = el('div', 'grid');
+    g.style.gridTemplateColumns = 'repeat(' + s.dock.length + ', var(--col))';
+    s.dock.forEach(a => g.append(appCell(a)));
+    sec.append(el('h2', null, 'Dock'), g); m.after(sec);
+  }
   const gbox = $('#gone');
   gbox.replaceChildren();
   const g = gone();
   if (g.length) {
     const sec = el('section', 'gone-row');
-    sec.append(el('h2', null, 'Uninstalled since ' + label(S[base])));
+    sec.append(el('h2', null, 'Not seen since ' + label(S[base])));
     const grid = el('div', 'grid');
     g.forEach(a => grid.append(appCell(a, false)));
     sec.append(grid); gbox.append(sec);
@@ -718,7 +828,7 @@ function drawTrail() {
   t.replaceChildren();
   if (!hits.length) { t.append(el('p', 'more', 'No matches')); t.hidden = false; return; }
   const app = hits[0];
-  t.append(el('h2', null, app));
+  t.append(el('h2', null, plain(app)));
   const ol = el('ol');
   for (let i = S.length - 1; i >= 0; i--) {
     const l = locs(S[i]).get(app);
@@ -727,7 +837,7 @@ function drawTrail() {
     ol.append(li);
   }
   t.append(ol);
-  if (hits.length > 1) t.append(el('p', 'more', 'Also matches: ' + hits.slice(1, 6).join(', ') + (hits.length > 6 ? '…' : '')));
+  if (hits.length > 1) t.append(el('p', 'more', 'Also matches: ' + hits.slice(1, 6).map(plain).join(', ') + (hits.length > 6 ? '…' : '')));
   t.hidden = false;
 }
 
@@ -747,6 +857,12 @@ document.querySelectorAll('.chip').forEach(c => c.addEventListener('click', () =
   filter = filter === c.dataset.k ? null : c.dataset.k;
   drawHead(); drawPages();
 }));
+// The Usage view: the charts in place of the pages; the rail and search stay.
+if ($('#usage-btn')) $('#usage-btn').addEventListener('click', () => {
+  const on = $('#usage').hidden;
+  $('#usage').hidden = !on; $('#pages').hidden = on; $('#gone').hidden = on;
+  $('#usage-btn').setAttribute('aria-pressed', String(on));
+});
 if ($('#sc')) {
   if (!D.review) $('#sc').remove();
   else $('#sc').addEventListener('click', () => {
@@ -788,9 +904,11 @@ addEventListener('resize', () => { clearTimeout(_rz); _rz = setTimeout(holdHead,
 """
 
 
-def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
+def render(layouts, icons, ids, page_size, review=None, public=False, name="Launchpad", usage=None, charts="") -> str:
     """Render the snapshots, oldest first, as one page with a history rail."""
-    by_title = {t: icons[ids[t]] for t in collect_titles(layouts) if ids.get(t) in icons}
+    layouts = [key_duplicates(layout) for layout in layouts]
+    plain = lambda t: t.split(DUP)[0]
+    by_title = {t: icons[ids[plain(t)]] for t in collect_titles(layouts) if ids.get(plain(t)) in icons}
     data = {
         "pageSize": page_size,
         "public": public,
@@ -799,17 +917,26 @@ def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
         "review": None if review is None or public
         else {a: [bool(v.get("show")), v.get("reason", "")] for a, v in review.items()},
         "icons": by_title,
+        # [year minutes, year launches, month minutes, month launches, last used, package known]
+        "usage": usage,
         "snapshots": [
-            {k: layout[k] for k in ("title", "date", "time", "draft", "note", "pages")} for layout in layouts
+            {k: layout[k] for k in ("title", "date", "time", "draft", "note", "pages", "grid", "dock")}
+            for layout in layouts
         ],
     }
     blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    heading = "Launchpad" if public else "Launchpad history" if len(layouts) > 1 else "Launchpad layout"
+    heading = name if public else f"{name} history" if len(layouts) > 1 else f"{name} layout"
+    chart_css = ""
+    if charts:
+        import usage_charts
+        chart_css = usage_charts.CHART_CSS
+    usage_btn = '<button class="toggle" type="button" id="usage-btn" aria-pressed="false">Usage</button>' if charts else ""
+    usage_sec = f'<section id="usage" class="usage" hidden>{charts}</section>' if charts else ""
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{heading}</title>
-<style>{CSS}</style></head><body>
+<style>{CSS}{chart_css}</style></head><body>
 <main>
   <header id="head">
   <div class="top">
@@ -830,15 +957,18 @@ def render(layouts, icons, ids, page_size, review=None, public=False) -> str:
     <button class="chip gone" type="button" data-k="dissolved"><i></i><span></span></button>
     <button class="chip new" type="button" data-k="new"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="gone"><i></i><span></span></button>
+    <button class="chip idle" type="button" data-k="idle"><i></i><span></span></button>
     <button class="chip shown" type="button" data-k="ok"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="no"><i></i><span></span></button>
     <button class="chip unreviewed" type="button" data-k="unrev"><i></i><span></span></button>
+    {usage_btn}
     <button class="toggle" type="button" id="sc" aria-pressed="false">Showcase</button>
     <button class="chip unreviewed" type="button" data-k="unreviewed" title="Not in the showcase approvals yet, so hidden from the showcase"><i></i><span></span></button>
   </div>
   </header>
   <div id="pages"></div>
   <div id="gone"></div>
+  {usage_sec}
 </main>
 <nav class="rail" aria-label="Snapshots, newest first"><ol></ol></nav>
 <dialog id="folder" aria-label="Folder contents"><div class="sheet"></div></dialog>
@@ -866,10 +996,15 @@ def main() -> int:
     ap.add_argument("--page-size", type=int, default=35, help="icons per page (default 35)")
     ap.add_argument("--icon-px", type=int, default=96, help="icon pixel size (default 96)")
     ap.add_argument("--db", help="database to read titles from (default: the live one)")
+    ap.add_argument("--icons", help="JSON of {app title: icon data URI}, used instead of "
+                    "looking icons up on this Mac (the phone's cropped icons)")
+    ap.add_argument("--name", default="Launchpad", help="what the page calls the layouts")
     ap.add_argument("--review", help="showcase approvals JSON; the history view "
                     "counts apps not reviewed yet")
     ap.add_argument("--showcase", help="showcase approvals JSON; render the last "
                     "layout with only the approved apps, for publishing")
+    ap.add_argument("--usage", help="per-app usage JSON from `phone usage --json`; shown "
+                    "in each app's menu, with a chip for apps not launched this year")
     args = ap.parse_args()
 
     docs = []
@@ -896,15 +1031,32 @@ def main() -> int:
             raise SystemExit(f"launchpad-map: no approvals at {args.showcase}")
         docs = [showcase_only(docs[-1], review)]
     layouts = [normalize(d, args.page_size) for d in docs]
-    ids = title_to_bundleid(args.db)
     titles = collect_titles(layouts)
-
-    icons = fetch_icons({(ids[t], t) for t in titles if t in ids}, args.icon_px)
+    if args.icons:
+        with open(args.icons) as fh:
+            icons = json.load(fh)
+        ids = {t: t for t in titles}
+    else:
+        ids = title_to_bundleid(args.db)
+        icons = fetch_icons({(ids[t], t) for t in titles if t in ids}, args.icon_px)
     # Either the title has no bundle id recorded, or AppKit could not find the app.
     missing = sorted(t for t in titles if ids.get(t) not in icons)
 
+    usage, charts = None, ""
+    if args.usage and not public:
+        import datetime
+        import usage_charts
+        with open(args.usage) as fh:
+            rows = json.load(fh)
+        usage = {t: [r["yearly"]["minutes"], r["yearly"]["launches"], r["monthly"]["minutes"],
+                     r["monthly"]["launches"], (r.get("last") or "")[:10], bool(r.get("package"))]
+                 for t, r in rows.items()}
+        # Folder membership for the charts: the newest real snapshot, not a draft.
+        newest = [d for d in docs if not d.get("draft")][-1]
+        read = datetime.date.fromtimestamp(os.path.getmtime(args.usage))
+        charts = usage_charts.charts(rows, newest, read)
     with open(args.out, "w") as fh:
-        fh.write(render(layouts, icons, ids, args.page_size, review, public))
+        fh.write(render(layouts, icons, ids, args.page_size, review, public, args.name, usage, charts))
 
     size_mb = os.path.getsize(args.out) / 1024 / 1024
     print(f"wrote {args.out} ({size_mb:.1f} MB, {len(icons)} icons)", file=sys.stderr)

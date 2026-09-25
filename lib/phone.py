@@ -80,15 +80,15 @@ class Phone:
         self.serial, self.work, self.shots = serial, work, 0
         self.run = datetime.datetime.now().strftime("%H%M%S")
         self.known = set(known)  # app titles whose icon we already have
+        self.want_icons = True   # a dump crops icons; driving the screen needs none
         self.pulls = ThreadPoolExecutor(max_workers=2)
         self.adb("shell", "mkdir", "-p", self.REMOTE)
+        self.serialno = self.adb("shell", "getprop", "ro.serialno").strip()
         size = re.findall(r"\d+", self.adb("shell", "wm", "size"))
         model = self.adb("shell", "getprop", "ro.product.model").strip()
         self.mirror = Mirror(int(size[0]), int(size[1]), model) if len(size) >= 2 else None
         if self.mirror and self.mirror.window:
             print("frames from the scrcpy mirror", file=sys.stderr)
-        else:
-            self.mirror = None
 
     def frame(self, name) -> str:
         """A screenshot as a local PNG path: from the mirror when one is up,
@@ -96,7 +96,7 @@ class Phone:
         path = os.path.join(self.work, f"{name}.png")
         if self.mirror and self.mirror.frame(path):
             return path
-        self.adb("shell", "screencap", "-p", f"{self.REMOTE}/{name}.png")
+        self.adb("shell", f"mkdir -p {self.REMOTE} && screencap -p {self.REMOTE}/{name}.png")
         self.adb("pull", f"{self.REMOTE}/{name}.png", path)
         return path
 
@@ -124,17 +124,24 @@ class Phone:
         time.sleep(wait)
 
     def wait_back(self, seconds=90):
-        """Wait for the phone to return after a drop; take its serial as listed."""
+        """Wait for this phone to return after a drop, under whatever name adb
+        lists it (mDNS name or IP:port), with other devices attached too."""
         print(f"phone dropped off adb; waiting up to {seconds}s", file=sys.stderr)
         end = time.time() + seconds
         while time.time() < end:
             time.sleep(3)
-            ready = connected()
-            if len(ready) == 1:
-                self.serial = ready[0]
-                print("phone is back", file=sys.stderr)
-                return
+            for s in connected():
+                if s == self.serial or (self.serialno and self.serialno in s) or self.is_me(s):
+                    self.serial = s
+                    print(f"phone is back as {s}", file=sys.stderr)
+                    return
         die(f"the phone did not come back within {seconds}s")
+
+    def is_me(self, serial) -> bool:
+        if not self.serialno or serial.startswith("adb-"):
+            return False  # an mDNS name carries the serial number itself
+        out = subprocess.run(["adb", "-s", serial, "shell", "getprop", "ro.serialno"], capture_output=True, text=True, timeout=10)
+        return out.stdout.strip() == self.serialno
 
     def front(self) -> str:
         """Every display's focused window: a mirror (scrcpy) adds a display
@@ -160,13 +167,13 @@ class Phone:
         with open(os.path.join(self.work, f"{name}.xml"), "w") as fh:
             fh.write(xml)
         scr = Screen(ET.fromstring(xml), None)
-        if any(n["label"] not in self.known and n["cls"] == "TextView" and n["b"][3] - n["b"][1] >= 100
+        if self.want_icons and any(n["label"] not in self.known and n["cls"] == "TextView" and n["b"][3] - n["b"][1] >= 100
                and n["b"][2] - n["b"][0] < scr.width * 0.5  # not a folder's title bar
                for n in scr.launcher()):
             scr.png = os.path.join(self.work, f"{name}.png")
             if not (self.mirror and self.mirror.frame(scr.png)):
                 remote = f"{self.REMOTE}/{name}.png"
-                self.adb("shell", "screencap", "-p", remote)
+                self.adb("shell", f"mkdir -p {self.REMOTE} && screencap -p {remote}")
                 scr.remote = remote
                 self.pulls.submit(self.pull, remote, scr.png)
         return scr
@@ -196,11 +203,23 @@ class Mirror:
         self.model = model
         self.window = self.find()
 
+    @staticmethod
+    def helper():
+        """window-id.swift compiled once (running it through `swift` costs
+        seconds per call), cached next to the source and rebuilt when older."""
+        exe = os.path.join(os.path.dirname(WINDOW_ID), ".window-id")
+        if not os.path.exists(exe) or os.path.getmtime(exe) < os.path.getmtime(WINDOW_ID):
+            subprocess.run(["swiftc", "-O", "-o", exe, WINDOW_ID], capture_output=True)
+        return exe if os.path.exists(exe) else None
+
     def find(self):
         """scrcpy titles its window after the device model unless told
         otherwise; any scrcpy window will do when neither name matches."""
+        exe = self.helper()
+        if not exe:
+            return None
         for title in (MIRROR_TITLE, self.model, ""):
-            out = subprocess.run(["swift", WINDOW_ID, "scrcpy", title], capture_output=True, text=True)
+            out = subprocess.run([exe, "scrcpy", title], capture_output=True, text=True)
             if out.returncode == 0:
                 wid, x, y, w, h = (int(v) for v in out.stdout.split())
                 return {"id": wid, "w": w, "h": h}
@@ -208,7 +227,7 @@ class Mirror:
 
     def frame(self, path) -> bool:
         if not self.window:
-            self.window = self.find()
+            self.window = self.find()  # cheap once compiled: a mirror started mid-run is picked up
             if not self.window:
                 return False
         r = subprocess.run(["screencapture", "-x", "-o", "-l", str(self.window["id"]), path], capture_output=True)
@@ -362,6 +381,14 @@ class Walk:
         for _ in range(20):  # folder screens; a folder longer than 3x5 scrolls vertically
             scr = p.screen()
             t, shown = self.popup(scr, background)
+            if not shown and not apps:  # the tap did not open it (page still settling): once more
+                time.sleep(1.0)
+                p.tap((b[0] + b[2]) // 2, (b[1] + b[3]) // 2, wait=1.0)
+                self.check_front(f"tapping the folder at {b} on page {page_no} again")
+                scr = p.screen()
+                t, shown = self.popup(scr, background)
+                if not shown:
+                    die(f"the folder at {b} on page {page_no} did not open; nothing recorded for it")
             title = title or t
             full = [x for x in shown if (x[1][3] - x[1][1]) >= 0.9 * max(y[1][3] - y[1][1] for y in shown)] if shown else []
             labels = [a for a, _ in apps]
@@ -552,7 +579,7 @@ def collect(walk: Walk):
     saved = load_progress()
     if saved:
         pages, dock, g, total, indicator = (saved[k] for k in ("pages", "dock", "grid", "total", "indicator"))
-        done = saved.get("folders", {})
+        done = {k: v for k, v in saved.get("folders", {}).items() if v[0] or v[1]}  # an empty read is no read
         print(f"resuming after page {len(pages)} of {total}"
               + (f" and {len(done)} folders of the next" if done else ""), file=sys.stderr)
     state = lambda: {"pages": pages, "dock": dock, "grid": g, "total": total,

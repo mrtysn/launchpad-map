@@ -8,8 +8,13 @@ open folder or onto an empty cell, Group, Edit folder) and is checked from a
 UI dump before the next one starts. Anything unexpected stops the run; nothing
 is retried blind, and the trash / Uninstall targets are never approached.
 
-The plan is computed from the live layout (a fresh `phone dump`), never from an
-old snapshot, and `--dry-run` prints it without touching the phone.
+The plan is computed from the newest snapshot in layouts/phone/, or from the
+driver's own record of the phone in layouts/phone/.write-log/state.json when a
+previous run left the proposal half applied (`--dump` reads the phone afresh
+instead). `--dry-run` prints the plan without touching the phone.
+
+Only a finished proposal enters the history: the snapshot is saved when nothing
+of it remains to do, and the partial states between runs stay in the write log.
 """
 
 import argparse
@@ -33,12 +38,15 @@ DONE_BTN = (1079, 272)          # [949,215][1210,330]
 EDITOR_OK = (1165, 373)         # [1101,309][1229,437]
 POPUP_CENTRE = (640, 1000)
 EDGE_NEXT, EDGE_PREV = 1272, 8
+STACK = 4
 CENTRE = (640, 1300)
 SETTINGS = "com.miui.home/.settings.MiuiHomeSettingActivity"
 LOCK_DESC = "Lock Home screen layout"
 CHECKED = re.compile(r"^(.*), (checked|unchecked)$")
-# One frame per finished operation, kept for reading back what a run did.
+# One frame per finished operation, kept for reading back what a run did, and
+# the driver's record of the phone between runs of one proposal.
 LOG = os.path.join(ph.LAYOUTS, ".write-log")
+STATE = os.path.join(LOG, "state.json")
 
 
 def die(msg):
@@ -111,11 +119,20 @@ def plan(live, proposal):
                     if ("folder", it["folder"]) in wanted.get(a, []):
                         wanted[a].remove(("folder", it["folder"]))
     moves = {}  # target -> {page: [apps]}
+    outs = []   # apps to drag out of a folder onto its page first
+    loose = []  # (app, page) as the plan will see them
     for pi, pg in enumerate(live["pages"]):
         for it in pg:
-            if "app" not in it:
-                continue
-            app, page = it["app"], pi + 1
+            if "app" in it:
+                loose.append((it["app"], pi + 1))
+            elif "folder" in it:
+                for a in list(it["apps"]):
+                    opts = wanted.get(a, [])
+                    if opts and ("folder", it["folder"]) not in opts and a not in [x for x, _ in loose]:
+                        outs.append({"op": "out-of-folder", "folder": it["folder"], "apps": [a], "page": pi + 1})
+                        loose.append((a, pi + 1))
+    for app, page in loose:
+        if True:
             options = wanted.get(app)
             if not options:
                 print(f"note: {app!r} on page {page} is not in the proposal; it stays where it is", file=sys.stderr)
@@ -124,7 +141,7 @@ def plan(live, proposal):
             options.remove(target)
             if target != ("page", page):
                 moves.setdefault(target, {}).setdefault(page, []).append(app)
-    ops, late = [], []
+    ops, late = list(outs), []
     room = {p: free_cells(live, p) for p in range(1, len(live["pages"]) + 1)}
     for name in sorted({t[1] for t in moves if t[0] == "folder"} - live_folders):
         pages = moves.pop(("folder", name))
@@ -145,7 +162,9 @@ def plan(live, proposal):
     for target, pages in sorted(moves.items(), key=lambda kv: str(kv[0])):
         for page, apps in sorted(pages.items()):
             if target[0] == "folder":
-                ops.append({"op": "into-folder", "page": page, "apps": apps, "folder": target[1]})
+                # a stack of up to 4 drops into an open folder reliably; a 15-stack left it
+                for i in range(0, len(apps), STACK):
+                    ops.append({"op": "into-folder", "page": page, "apps": apps[i:i + STACK], "folder": target[1]})
             else:
                 ops.append({"op": "to-page", "page": page, "apps": apps, "target": target[1]})
     for pg in live["pages"]:
@@ -153,11 +172,19 @@ def plan(live, proposal):
             if "folder" not in it:
                 continue
             want_order = [a for a, w in placements(proposal) if w == ("folder", it["folder"])]
-            have = [a for a in it["apps"] if a in want_order]
+            leaving = {o["apps"][0] for o in outs if o["folder"] == it["folder"]}
+            have = [a for a in it["apps"] if a in want_order and a not in leaving]
             expect = [a for a in want_order if a in it["apps"]]
             if have != expect:
-                tail = expect[len(lcp(have, expect)):]
-                late.append({"op": "reorder", "folder": it["folder"], "apps": tail})
+                # the shortest tail of the wanted order whose removal leaves
+                # the rest already in place: those are the apps to drag to the end
+                tail = next((expect[-k:] for k in range(1, len(expect))
+                             if [a for a in have if a not in expect[-k:]] == expect[:-k]), None)
+                if tail is None:
+                    print(f"note: folder {it['folder']!r} is ordered differently from the proposal in a way "
+                          f"a move-to-end cannot fix; left as it is", file=sys.stderr)
+                else:
+                    late.append({"op": "reorder", "folder": it["folder"], "apps": tail, "order": expect})
     return ops + late
 
 
@@ -178,6 +205,8 @@ def describe(op):
         return f"page {op['page']}: carry {len(op['apps'])} apps to page {op['target']}"
     if op["op"] == "reorder":
         return f"folder {op['folder']!r}: move {len(op['apps'])} apps to the end"
+    if op["op"] == "out-of-folder":
+        return f"folder {op['folder']!r}: drag {op['apps'][0]!r} out onto page {op['page']}"
     return f"page {op['page']}: drag folder {op['folder']!r} to page {op['target']}  [UNVERIFIED gesture]"
 
 
@@ -201,6 +230,45 @@ def judge(state: str, questions: dict):
         return json.loads(out.stdout)["answers"]
     except (ValueError, KeyError):
         return None
+
+
+# What the launcher can be showing when a post-move check fails, and what the
+# driver does about each. Only BACK, HOME, a page turn and one more look are
+# ever taken on its own; everything else stops the run for a human.
+CLASSES = {
+    "folder_open": "a folder popup is still open over the page",
+    "wrong_page": "the page indicator shows a page other than the target",
+    "dialog": "a system or app dialog, sheet or another app is in front",
+    "locked": "the lock screen or keyguard is showing",
+    "unsettled": "the launcher is mid-animation or the tree is incomplete (few nodes, no page indicator)",
+    "landed_off": "the moved apps are on the target page or in the folder but not where planned",
+    "ok": "the expected layout is present as described",
+    "unknown": "none of the above fits",
+}
+CLASSIFIED_RETRIES = 2
+CLASSIFY_LOG = os.path.join(LOG, "classify.jsonl")
+
+
+def tree_excerpt(scr, front: str, target_b=None) -> str:
+    """The part of a UI dump a mismatch can be classified from: page
+    indicator, wide nodes (dialogs, sheets, popups), the target cell, window
+    and dialog titles, the keyguard if present."""
+    lines = [f"foreground window: {front}", f"nodes in tree: {len(scr.nodes)}"]
+    pg = scr.page()
+    lines.append(f"page indicator: {pg[0]} of {pg[1]}" if pg else "page indicator: none")
+    for n in scr.nodes:
+        if len(n["b"]) != 4:
+            continue
+        wide = n["b"][2] - n["b"][0] >= 0.6 * scr.width
+        keyguard = "keyguard" in (n["pkg"] or "") or "lock" in n["desc"].lower()
+        titled = n["cls"] in ("TextView", "Button") and n["label"] and n["pkg"] != ph.LAUNCHER
+        if wide or keyguard or titled:
+            lines.append(f"{n['pkg']} {n['cls']} {n['b']} {n['desc'][:60]!r}")
+    if target_b:
+        inside = [n for n in scr.launcher() if n["label"] and n["b"][0] >= target_b[0] - 5
+                  and n["b"][2] <= target_b[2] + 5 and n["b"][1] >= target_b[1] - 5 and n["b"][3] <= target_b[3] + 5]
+        lines.append(f"target cell {target_b}: " + (", ".join(n["label"] for n in inside[:6]) or "empty"))
+    return "\n".join(lines[:60])
 
 
 def screen_state(scr, front: str, edit: bool, popup_title: str, popup_items: list, expected: str) -> str:
@@ -236,7 +304,49 @@ class Driver:
 
     # -- reading
     def dump(self):
+        self.dumps = getattr(self, "dumps", 0) + 1
         return self.p.screen()
+
+    # -- classifying a failed check
+    def classify(self, scr, expected: str, target_b=None):
+        """One system-one question over the dump: what is the launcher showing?
+        Returns (class, probabilities); ('unknown', {}) when there is no answer.
+        Every verdict is appended to the write log for later labelling."""
+        state = f"expected: {expected}\n" + tree_excerpt(scr, self.p.front(), target_b)
+        ans = judge(state, {"state": {"type": "choice", "instructions": "What is the launcher showing after the move?",
+                                      "criteria": CLASSES}})
+        choice, probs = ("unknown", {}) if ans is None else (ans["state"]["choice"], ans["state"]["probabilities"])
+        os.makedirs(LOG, exist_ok=True)
+        with open(CLASSIFY_LOG, "a") as fh:
+            fh.write(json.dumps({"time": datetime.datetime.now().isoformat(timespec="seconds"), "expected": expected,
+                                 "choice": choice, "probabilities": probs, "state": state}, ensure_ascii=False) + "\n")
+        print(f"   system-one: {choice} ({', '.join(f'{k} {v:.2f}' for k, v in probs.items())})", file=sys.stderr)
+        return choice, probs
+
+    def verified(self, check, expected: str, target_page=None, target_b=None):
+        """Run `check() -> (ok, detail)`. On a failure the screen is classified
+        once and the class decides: folder_open -> BACK, wrong_page -> turn to
+        the target page, unsettled -> one more look after 0.6 s, each followed
+        by the check again, at most CLASSIFIED_RETRIES times; landed_off comes
+        back to the caller as (False, detail); anything else stops the run."""
+        for attempt in range(CLASSIFIED_RETRIES + 1):
+            ok, detail = check()
+            if ok:
+                return True, detail
+            if attempt == CLASSIFIED_RETRIES:
+                break
+            choice, probs = self.classify(self.dump(), expected, target_b)
+            if choice == "folder_open" and probs.get(choice, 0) >= JUDGE_THRESHOLD:
+                self.p.key("KEYCODE_BACK", 0.6)
+            elif choice == "wrong_page" and probs.get(choice, 0) >= JUDGE_THRESHOLD and target_page:
+                self.go(target_page)
+            elif choice == "unsettled" and probs.get(choice, 0) >= JUDGE_THRESHOLD:
+                time.sleep(0.6)
+            elif choice == "landed_off" and probs.get(choice, 0) >= JUDGE_THRESHOLD:
+                return False, detail
+            else:
+                break
+        die(f"{expected}: not confirmed ({detail}); stopped for a look")
 
     def page_no(self, scr=None):
         pg = (scr or self.dump()).page()
@@ -448,7 +558,7 @@ class Driver:
     POP_W, POP_DX, POP_DY = 261, 274, 294
 
     @classmethod
-    def after_last(cls, last: str, max_scrolls=12) -> str:
+    def after_last(cls, last: str, max_scrolls=16) -> str:
         """Shell: with the stack held over an open folder popup, find the
         folder's last app in a UI dump, scrolling the popup by hovering at its
         bottom edge until it is on screen, then release just after it."""
@@ -457,16 +567,29 @@ class Driver:
         item = "bounds=\"\\[" + cols + ",[0-9]*\\]\\[[0-9]*,[0-9]*\\]\""
         return (
             f"found=0; for j in $(seq 1 {max_scrolls}); do "
-            "uiautomator dump /data/local/tmp/lm-pop.xml >/dev/null 2>&1; "
+            # a fresh dump every time: uiautomator writes nothing while the popup is still
+            # animating, and a stale file would be read as "still not there" forever
+            "rm -f /data/local/tmp/lm-pop.xml; sleep 0.6; uiautomator dump /data/local/tmp/lm-pop.xml >/dev/null 2>&1 || sleep 0.8; "
+            "[ -s /data/local/tmp/lm-pop.xml ] || { sleep 0.8; uiautomator dump /data/local/tmp/lm-pop.xml >/dev/null 2>&1; }; "
+            "echo \"scan:$j:$(wc -c < /data/local/tmp/lm-pop.xml 2>/dev/null)\"; "
             f"b=$(grep -oE 'content-desc=\"{pat}\"[^>]*{item}' /data/local/tmp/lm-pop.xml | head -1 | grep -o 'bounds=\"[^\"]*\"' | grep -o '[0-9]*' | tr '\\n' ' '); "
             "if [ -n \"$b\" ]; then found=1; break; fi; "
             f"edge=$(grep -oE 'unchecked\"[^>]*{item}' /data/local/tmp/lm-pop.xml | grep -o ',[0-9]*\\]\"$' | tr -d ',]\"' | sort -n | tail -1); "
             "[ -z \"$edge\" ] && edge=1900; "
-            "input motionevent MOVE 640 $((edge - 30)); sleep 1.3; input motionevent MOVE 640 $((edge - 400)); sleep 0.6; "
+            "input motionevent MOVE 640 $((edge - 150)); sleep 1.3; input motionevent MOVE 640 $((edge - 400)); sleep 0.6; "
             "done; "
             f"if [ $found = 1 ]; then set -- $b; "
+            # clipped at the grid's bottom edge: scroll once more so the whole cell (and the
+            # slot after it) is inside the grid, then re-read its bounds
+            f"if [ $(($4 - $2)) -lt 200 ]; then input motionevent MOVE 640 $(($4 - 120)); sleep 1.3; input motionevent MOVE 640 $(($4 - 500)); sleep 0.8; "
+            "rm -f /data/local/tmp/lm-pop.xml; uiautomator dump /data/local/tmp/lm-pop.xml >/dev/null 2>&1; "
+            f"b2=$(grep -oE 'content-desc=\"{pat}\"[^>]*{item}' /data/local/tmp/lm-pop.xml | head -1 | grep -o 'bounds=\"[^\"]*\"' | grep -o '[0-9]*' | tr '\\n' ' '); "
+            "[ -n \"$b2\" ] && set -- $b2; echo \"unclipped:$b2\"; fi; "
             f"if [ $1 -lt 700 ]; then rx=$(($1 + {cls.POP_DX} + {cls.POP_W // 2})); ry=$(($2 + {cls.POP_W // 2})); "
-            f"else rx=$(({cls.POP_COLS[0]} + {cls.POP_W // 2})); ry=$(($2 + {cls.POP_DY} + {cls.POP_W // 2})); fi; "
+            # row full: no empty cell exists in the grid, so release on the last app
+            # itself, which inserts the stack before it; the caller then moves that
+            # app back in front of the stack (release on an item = insert before it)
+            f"else rx=$(($1 + {cls.POP_W // 2})); ry=$(($2 + {cls.POP_W // 2})); echo before-last; fi; "
             "echo \"release:$rx,$ry after:$b\"; input motionevent MOVE $rx $ry; sleep 0.9; input motionevent UP $rx $ry; echo dropped; "
             "else echo 'last not found'; __BACK__; fi"
         )
@@ -478,6 +601,12 @@ class Driver:
         if fpage is None:
             die(f"folder {name!r} is not on the phone")
         scr = self.enter_edit(page)
+        if not any(self.find(scr, a) for a in apps):
+            self.leave_edit()
+            if self.reconcile(op):
+                print("   already in the folder from an interrupted run; recorded", file=sys.stderr)
+                return
+            die(f"{apps} are not on page {page}")
         scr = self.select(scr, apps)
         fx, fy = centre(EDIT, *fat)
         last = self.folder_entry(name)["apps"][-1]
@@ -485,9 +614,16 @@ class Driver:
                 f"input motionevent MOVE {POPUP_CENTRE[0]} {POPUP_CENTRE[1]}; sleep 0.6; "
                 + self.after_last(last))
         self.carry(self.find(scr, apps[0]), fpage, then, start=page)
-        ok, seen = self.folder_contains(apps)
+        ok, seen = self.verified(lambda: self.folder_contains(apps),
+                                 f"folder {name!r} open in edit mode, showing {apps}", target_page=fpage)
         if not ok:
             die(f"after the drop, folder {name!r} shows {seen[:8]}…; missing {sorted(set(apps) - set(seen))}")
+        if seen.index(last) > seen.index(apps[0]):
+            # the stack went in before the old last app (full last row): put that app back in front
+            self.move_before(last, apps[0])
+            ok, seen = self.folder_contains([last] + apps)
+            if not ok or seen.index(last) > seen.index(apps[0]):
+                die(f"could not move {last!r} back in front of the stack in {name!r}: {seen[-8:]}")
         self.take(page, apps)
         self.folder_entry(name)["apps"] += apps
         expect = self.folder_entry(name)["apps"]
@@ -497,10 +633,17 @@ class Driver:
         self.leave_edit()
 
     def take(self, page, apps):
-        """Drop `apps` from `page` in the in-memory layout; their cells are free."""
+        """Drop `apps` from `page` in the in-memory layout; their cells are
+        free. A page left empty is removed, as the launcher removes it, and
+        everything after it moves up one."""
         entries = self.live["pages"][page - 1]
         self.free[page] |= {tuple(it["at"]) for it in entries if it.get("app") in apps}
         entries[:] = [it for it in entries if it.get("app") not in apps]
+        if not entries and page > 1:
+            print(f"   page {page} is empty now; the launcher drops it, later pages move up", file=sys.stderr)
+            del self.live["pages"][page - 1]
+            self.free = {(k - 1 if k > page else k): v for k, v in self.free.items() if k != page}
+            self.folder_at = {n: ((pg - 1 if pg > page else pg), at) for n, (pg, at) in self.folder_at.items()}
 
     def folder_entry(self, name):
         for pg in self.live["pages"]:
@@ -519,12 +662,17 @@ class Driver:
         tx, ty = centre(EDIT, *cells[0])
         then = f"input motionevent MOVE {tx} {ty}; sleep 0.9; input motionevent UP {tx} {ty}"
         self.carry(self.find(scr, apps[0]), target, then, start=page)
-        scr = self.dump()
-        if self.page_no(scr) != target:
-            die(f"expected to be on page {target} after the drop, at {self.page_no(scr)}")
-        missing = [a for a in apps if not self.find(scr, a)]
-        if missing:
-            die(f"not on page {target} after the drop: {missing}")
+
+        def landed():
+            s = self.dump()
+            if self.page_no(s) != target:
+                return False, (s, f"at page {self.page_no(s)}")
+            missing = [a for a in apps if not self.find(s, a)]
+            return not missing, (s, f"missing {missing}" if missing else "")
+        ok, (scr, detail) = self.verified(landed, f"page {target} in edit mode showing {apps}",
+                                          target_page=target, target_b=[tx - 130, ty - 130, tx + 130, ty + 130])
+        if not ok:  # the cells are read from the screen below, so only an absent app is a failure
+            die(f"after the drop on page {target}: {detail}")
         self.take(page, apps)
         while len(self.live["pages"]) < target:
             self.live["pages"].append([])
@@ -587,39 +735,151 @@ class Driver:
             die(f"the folder is not called {name!r} after the rename")
 
     def reorder(self, op):
-        """Drag `apps`, in order, to the end of folder `name` (edit mode, so
-        labels read back as 'Name, unchecked'). Each drag: pick the app up
-        inside the open popup, then the same scroll-to-last and release-after
-        as a drop from outside."""
-        name, apps = op["folder"], op["apps"]
+        """Bring folder `name` to the wanted order. The live order is read
+        from the popup first (the snapshot's can be stale). Then, walking the
+        wanted order, every app found out of place is picked up and released
+        on the app that should come after it: a release on an item inserts
+        before it, which is the one drop the grid accepts everywhere. Both
+        apps have to be on screen, which holds when the disorder sits within
+        the popup's last rows, as an append-gone-wrong always does."""
+        name, want = op["folder"], op["order"]
         fpage, fat = self.folder_at[name]
         entry = self.folder_entry(name)
         self.enter_edit(fpage)
         self.p.tap(*centre(EDIT, *fat), wait=0.9)
-        for a in apps:
+        ok, seen = self.verified(lambda: self.folder_contains(entry["apps"], tries=12),
+                                 f"folder {name!r} open in edit mode with all {len(entry['apps'])} apps", target_page=fpage)
+        if not ok:
+            die(f"could not read all of folder {name!r}: {len(seen)} of {len(entry['apps'])}")
+        entry["apps"] = seen
+        # a title can occur twice (two "File Manager"s); the order is compared on first occurrences
+        uniq = lambda xs: list(dict.fromkeys(xs))
+        have = uniq(x for x in seen if x in want)
+        expect = uniq(x for x in want if x in seen)
+        moves = 0
+        for j in range(len(expect)):
+            if have[j] == expect[j]:
+                continue
+            app, before = expect[j], have[j]
             scr = self.dump()
-            b = self.popup_bounds(scr, a)
-            if not b:
-                # scroll the popup to find it
-                ok, _ = self.folder_contains([a])
+            if not (self.popup_bounds(scr, app) and self.popup_bounds(scr, before)):
+                self.popup_top()
+                self.folder_contains([app, before], tries=12)
                 scr = self.dump()
-                b = self.popup_bounds(scr, a)
-            if not b:
-                die(f"{a!r} is not in folder {name!r}")
-            last = [x for x in entry["apps"] if x != a][-1]
-            x, y = mid(b)
-            script = (f"input motionevent DOWN {x} {y}; sleep 0.9; input motionevent MOVE {x + 20} {y}; sleep 0.3; "
-                      f"input motionevent MOVE {x + 40} {y + 20}; sleep 0.5; "
-                      + self.after_last(last).replace("__BACK__", f"input motionevent MOVE {x} {y}; sleep 0.8; input motionevent UP {x} {y}; echo ABORT"))
-            out = self.gesture(script)
-            if "ABORT" in out:
-                die(f"could not move {a!r} to the end of {name!r}")
-            entry["apps"].remove(a); entry["apps"].append(a)
-        ok, seen = self.folder_contains(entry["apps"][-3:])
-        if seen[-len(apps):] != apps:
-            die(f"folder {name!r} ends with {seen[-4:]}, expected …{apps}")
+            if not (self.popup_bounds(scr, app) and self.popup_bounds(scr, before)):
+                die(f"{app!r} and {before!r} are not on screen together in {name!r}; cannot reorder")
+            self.move_before(app, before)
+            have.remove(app); have.insert(j, app)
+            moves += 1
+        # verify on the popup's last screen alone: a single dump, no scroll
+        # stitching (which can misplace a row in a long folder)
+        self.folder_contains([expect[-1]], tries=12)
+        bottom = uniq(x for x in self.popup_items(self.dump()) if x in want)
+        if bottom != expect[-len(bottom):]:
+            die(f"folder {name!r} ends with {bottom[-6:]}, wanted …{expect[-6:]}")
+        for x in expect[-len(bottom):]:
+            entry["apps"].remove(x)
+        entry["apps"] += expect[-len(bottom):]
+        print(f"   {name!r} in order after {moves} moves", file=sys.stderr)
         self.p.key("KEYCODE_BACK", 0.5)
         self.leave_edit()
+
+    def popup_top(self):
+        """Scroll the open popup back to its first row."""
+        first = None
+        for _ in range(12):
+            scr = self.dump()
+            items = self.popup_items(scr)
+            if not items or items[0] == first:
+                return
+            first = items[0]
+            full = [b for a, b in self.walk.popup(scr, set())[1] if b[0] in self.POP_COLS]
+            top, bottom = min(b[1] for b in full), max(b[3] for b in full)
+            row = min(b[3] - b[1] for b in full)
+            cx, cy = scr.width // 2, (top + bottom) // 2
+            self.p.swipe(cx, cy - row, cx, cy + row * 2, wait=0.6, ms=600)
+
+    def reconcile(self, op) -> bool:
+        """After adb broke mid-operation: did the gesture finish on the phone?
+        For a folder drop, the apps gone from their page and present in the
+        folder means yes; the layout is updated and the op counts as done."""
+        if op["op"] != "into-folder":
+            return False
+        page, apps, name = op["page"], op["apps"], op["folder"]
+        scr = self.go(page)
+        if any(self.find(scr, a) for a in apps):
+            return False
+        fpage, fat = self.folder_at[name]
+        self.enter_edit(fpage)
+        self.p.tap(*centre(EDIT, *fat), wait=0.9)
+        ok, seen = self.folder_contains(apps)
+        self.p.key("KEYCODE_BACK", 0.5)
+        self.leave_edit()
+        if not ok:
+            die(f"{apps} are neither on page {page} nor in {name!r}")
+        self.take(page, apps)
+        self.folder_entry(name)["apps"] += apps
+        return True
+
+    def move_before(self, app, target):
+        """Inside the open popup (edit mode): pick `app` up and release it on
+        `target`, which inserts it before that app. Both must be on screen."""
+        scr = self.dump()
+        a, t = self.popup_bounds(scr, app), self.popup_bounds(scr, target)
+        if not a or not t:
+            die(f"{app!r} or {target!r} is not on screen in the open folder")
+        x, y = mid(a); tx, ty = mid(t)
+        self.gesture(f"input motionevent DOWN {x} {y}; sleep 0.9; input motionevent MOVE {x + 20} {y}; sleep 0.3; "
+                     f"input motionevent MOVE {tx} {ty}; sleep 1.0; input motionevent UP {tx} {ty}; echo moved")
+
+    def out_of_folder(self, op):
+        """In normal mode (experiment 7): open the folder, pick the app up
+        inside the popup, drag it out past the popup's edge (the popup closes
+        and the page shows in drag mode), drop it on a free cell of the page."""
+        name, app, page = op["folder"], op["apps"][0], op["page"]
+        cells = sorted(self.free[page], key=lambda cr: (cr[1], cr[0]))
+        if not cells:
+            die(f"page {page} has no free cell for {app!r}")
+        self.leave_edit()
+        scr = self.go(page)
+        background = {tuple(n["b"]) for n in scr.launcher()}
+        fb = self.folder_cell_bounds(scr, name if name.isascii() else "Folder")
+        if not fb:
+            die(f"folder {name!r} not found on page {page}")
+        self.p.tap(*mid(fb), wait=0.9)
+        b = None
+        for _ in range(10):
+            scr = self.dump()
+            items = [(a, bb) for a, bb in self.walk.popup(scr, background)[1]]
+            hit = [bb for a, bb in items if a == app]
+            if hit:
+                b = hit[0]
+                break
+            if not items:
+                break
+            full = [bb for _, bb in items]
+            top, bottom = min(x[1] for x in full), max(x[3] for x in full)
+            row = min(x[3] - x[1] for x in full)
+            cx, cy = scr.width // 2, (top + bottom) // 2
+            self.p.swipe(cx, cy + row, cx, cy - row, wait=0.6, ms=600)
+        if not b:
+            self.p.key("KEYCODE_BACK", 0.5)
+            die(f"{app!r} is not in folder {name!r}")
+        x, y = mid(b)
+        tx, ty = centre(DRAG, *cells[0])
+        script = (f"input motionevent DOWN {x} {y}; sleep 0.9; input motionevent MOVE {x + 20} {y}; sleep 0.3; "
+                  f"input motionevent MOVE 40 {y}; sleep 0.9; input motionevent MOVE 40 {ty}; sleep 0.6; "
+                  f"input motionevent MOVE {tx} {ty}; sleep 0.9; input motionevent UP {tx} {ty}; echo dropped")
+        self.gesture(script)
+        scr = self.dump()
+        if self.walk.popup(scr, background)[1]:
+            self.p.key("KEYCODE_BACK", 0.5)
+            die(f"the folder popup is still open after the drag; {app!r} stayed in {name!r}")
+        if not self.find(scr, app):
+            die(f"{app!r} did not land on page {page}")
+        entry = self.folder_entry(name); entry["apps"].remove(app)
+        self.free[page].discard(cells[0])
+        self.live["pages"][page - 1].append({"app": app, "at": list(cells[0])})
 
     def move_folder(self, op):
         name, page, target = op["folder"], op["page"], op["target"]
@@ -672,11 +932,13 @@ class Driver:
             die(f"system-one does not see the expected result (p={ok:.2f}); stopped for a look")
 
     def run(self, i, op):
+        t0, d0 = time.monotonic(), getattr(self, "dumps", 0)
         getattr(self, op["op"].replace("-", "_"))(op)
         self.walk.check_front(describe(op))
         self.gate(op)
         if self.p.mirror:
             shutil.copy(self.p.frame(f"op{i:02}"), os.path.join(LOG, f"op{i:02}.png"))
+        print(f"   {self.dumps - d0} dumps, {time.monotonic() - t0:.0f} s", file=sys.stderr)
 
 
 # ---------------------------------------------------------------- main
@@ -701,17 +963,31 @@ def newest_snapshot():
     return os.path.join(ph.LAYOUTS, names[-1])
 
 
-def save_snapshot(live, done, total):
+def starting_point():
+    """The driver's record of the phone if a proposal is half applied, else the newest snapshot."""
+    if os.path.exists(STATE) and os.path.getmtime(STATE) > os.path.getmtime(newest_snapshot()):
+        return STATE
+    return newest_snapshot()
+
+
+def record(live, proposal, finished):
+    """Keep the driver's model: in the history once the proposal is applied, else in the write log."""
     now = datetime.datetime.now()
     live = dict(live)
     live["date"], live["time"] = now.date().isoformat(), now.strftime("%H:%M")
-    live["note"] = f"after phone write: {done} of {total} operations"
     for pg in live["pages"]:
         pg.sort(key=lambda e: (e["at"][1], e["at"][0]))
-    path = os.path.join(ph.LAYOUTS, f"{now:%Y-%m-%d-%H%M}.json")
+    if finished:
+        live["note"] = "applied: " + (proposal.get("note") or proposal.get("title") or "the proposal")
+        path = os.path.join(ph.LAYOUTS, f"{now:%Y-%m-%d-%H%M}.json")
+    else:
+        live["note"] = "the driver's record between runs; not yet the applied proposal"
+        path = STATE
     with open(path, "w") as fh:
         json.dump(live, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
+    if finished and os.path.exists(STATE):
+        os.remove(STATE)
     print(path)
 
 
@@ -724,6 +1000,7 @@ def main():
     ap.add_argument("--dump", action="store_true", help="read the phone afresh before planning instead of trusting the newest snapshot")
     ap.add_argument("--serial", "-s", default=os.environ.get("ANDROID_SERIAL"))
     ap.add_argument("--max-ops", type=int, help="stop after this many operations")
+    ap.add_argument("--unlock", action="store_true", help="visit the launcher settings first to switch the layout lock off (default: assume it is off)")
     ap.add_argument("--lock", action="store_true", help="turn the layout lock back on at the end (default: leave it off)")
     args = ap.parse_args()
 
@@ -733,7 +1010,7 @@ def main():
     if args.dump:
         live = fresh_dump(serial)
     else:
-        with open(args.snapshot or newest_snapshot()) as fh:
+        with open(args.snapshot or starting_point()) as fh:
             live = json.load(fh)
         if live.get("draft"):
             die("the newest layout is a draft, not a snapshot")
@@ -752,13 +1029,36 @@ def main():
     os.makedirs(work, exist_ok=True)
     os.makedirs(LOG, exist_ok=True)
     phone = ph.Phone(serial, work, known=ph.load_icons())
+    phone.want_icons = False
     d = Driver(phone, live)
-    d.set_lock(False)
+    if args.unlock:
+        d.set_lock(False)
     done = 0
     try:
         for i, op in enumerate(ops[:args.max_ops], 1):
             print(f"-- {i}/{len(ops)} {describe(op)}", file=sys.stderr)
-            d.run(i, op)
+            for attempt in (1, 2):
+                try:
+                    d.run(i, op)
+                    break
+                except (ph.Dropped, ph.Failed) as e:
+                    if attempt == 2:
+                        raise
+                    print(f"   adb broke mid-operation ({e}); waiting for the phone", file=sys.stderr)
+                    for _ in range(3):
+                        try:
+                            phone.wait_back(240)
+                            d.leave_edit()
+                            settled = d.reconcile(op)
+                            break
+                        except (ph.Dropped, ph.Failed):
+                            continue
+                    else:
+                        raise
+                    if settled:
+                        print("   the operation had completed on the phone; recorded", file=sys.stderr)
+                        break
+                    print("   retrying the operation", file=sys.stderr)
             done += 1
     finally:
         try:
@@ -770,7 +1070,7 @@ def main():
         phone.finish()
         shutil.rmtree(work, ignore_errors=True)
         if done:
-            save_snapshot(d.live, done, len(ops))
+            record(d.live, proposal, finished=not plan(d.live, proposal))
     print(f"done: {done} of {len(ops)} operations", file=sys.stderr)
     return 0
 

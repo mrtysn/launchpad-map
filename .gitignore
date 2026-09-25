@@ -7,6 +7,8 @@ __pycache__/
 # layouts/example.json is the committed sample; real dumps stay local.
 layouts/*.json
 !layouts/example.json
+layouts/phone/
 
 # Showcase approvals list this machine's apps too; showcase.example.json is the sample.
 showcase.json
+lib/.window-id

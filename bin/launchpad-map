@@ -17,6 +17,11 @@ USAGE
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
   launchpad-map inventory INVENTORY.md [--out FILE] [--label TEXT] [--no-icons]
+  launchpad-map phone dump [--save] [--out FILE] [--serial SERIAL] [--note TEXT]
+  launchpad-map phone history [--out FILE] [--open]
+  launchpad-map phone write PROPOSAL [--dry-run] [--from SNAPSHOT] [--max-ops N]
+  launchpad-map phone usage [--json] [--save] [--serial SERIAL]
+  launchpad-map phone reorg REORG.json [--title T] [--note N] > layouts/phone/proposal-N.json
   launchpad-map --help
 
 COMMANDS
@@ -46,6 +51,13 @@ COMMANDS
            Dock. Adds a snapshot to the history. Use
            --dry-run to see the report without writing.
 
+  phone    The Android phone's home screen, read over adb (HyperOS launcher).
+           `phone dump` walks every page and folder, reading labels from the
+           UI hierarchy and cropping icons from screenshots; --save adds it
+           to layouts/phone/. `phone history` renders those snapshots to
+           phone-history.html. The only input sent to the phone is HOME,
+           BACK, page swipes and taps on folder icons.
+
   inventory
            Cross-reference a saved app inventory (Mac App Store / Homebrew
            casks / /Applications, as dumped during a machine offboarding)
@@ -71,6 +83,17 @@ case "${1-}" in
   history) shift; exec python3 "$LIB/history.py" "$@" ;;
   inventory) shift; exec python3 "$LIB/inventory.py" "$@" ;;
   showcase) exec python3 "$LIB/history.py" "$@" ;;
+  phone)
+    shift
+    case "${1-}" in
+      dump)    shift; exec python3 "$LIB/phone.py" "$@" ;;
+      history) shift; exec python3 "$LIB/history.py" --phone "$@" ;;
+      write)   shift; exec python3 "$LIB/phone_write.py" "$@" ;;
+      usage)   shift; exec python3 "$LIB/phone_usage.py" "$@" ;;
+      reorg)   shift; exec python3 "$LIB/phone_reorg.py" "$@" ;;
+      *) print -u2 "launchpad-map: phone takes dump, history, write, usage or reorg"; exit 64 ;;
+    esac
+    ;;
   open)
     shift
     out="$(mktemp -t launchpad-map.XXXXXX).html"
