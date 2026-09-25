@@ -39,6 +39,8 @@ EDITOR_OK = (1165, 373)         # [1101,309][1229,437]
 POPUP_CENTRE = (640, 1000)
 EDGE_NEXT, EDGE_PREV = 1272, 8
 STACK = 4
+STACK_OUT = 10                  # apps selected inside a folder and dropped on a page thumbnail at once
+GESTURE_TIMEOUT = 240           # s: the longest on-phone gesture script, plus an adb drop in the middle
 CENTRE = (640, 1300)
 SETTINGS = "com.miui.home/.settings.MiuiHomeSettingActivity"
 LOCK_DESC = "Lock Home screen layout"
@@ -47,6 +49,9 @@ CHECKED = re.compile(r"^(.*), (checked|unchecked)$")
 # the driver's record of the phone between runs of one proposal.
 LOG = os.path.join(ph.LAYOUTS, ".write-log")
 STATE = os.path.join(LOG, "state.json")
+PROGRESS = os.path.join(LOG, "progress.json")   # what `phone watch` shows
+CONTROL = os.path.join(LOG, "control")          # "pause" | "stop", read between operations
+RUN_LOG = os.path.join(LOG, "run.log")          # everything the driver prints
 
 
 def die(msg):
@@ -100,16 +105,20 @@ def free_cells(live, page):
 def plan(live, proposal):
     """The ordered operations that take `live` to `proposal`.
 
-    Only loose apps move; apps already inside a folder stay where they are
-    (the proposal has no folder-to-folder moves, and the drag out of a folder
-    is a slower gesture). A folder that does not exist yet is built on the page
-    the proposal puts it on when that page has room for its apps, so only
-    verified gestures are needed; otherwise it is grouped on the page holding
-    most of its apps and dragged over at the end."""
+    Apps leaving a folder go out as a stack (split-folder: selected inside the
+    open folder, dropped on a page thumbnail), onto the page they are headed
+    for when it has room, else onto the page with most room; from there they
+    are loose and move like any loose app. A folder that does not exist yet is
+    grouped as soon as its apps are out, largest folder first, so a page never
+    has to hold more than one folder's worth of loose apps at a time; a new
+    folder fed from several pages is grouped on the page holding most of its
+    apps and dragged over at the end. An existing folder the proposal puts on
+    another page is dragged there at the end too."""
     wanted = {}
     for title, where in placements(proposal):
         wanted.setdefault(title, []).append(where)
     live_folders = {it["folder"] for pg in live["pages"] for it in pg if "folder" in it}
+    folder_on = {it["folder"]: pi + 1 for pi, pg in enumerate(live["pages"]) for it in pg if "folder" in it}
     # Apps already inside a folder keep the matching placement, so a duplicate
     # title loose on a page is matched against what is left.
     for pg in live["pages"]:
@@ -119,18 +128,68 @@ def plan(live, proposal):
                     if ("folder", it["folder"]) in wanted.get(a, []):
                         wanted[a].remove(("folder", it["folder"]))
     moves = {}  # target -> {page: [apps]}
-    outs = []   # apps to drag out of a folder onto its page first
     loose = []  # (app, page) as the plan will see them
+    leaving = {}  # live folder -> {target: [apps]}
     for pi, pg in enumerate(live["pages"]):
         for it in pg:
             if "app" in it:
                 loose.append((it["app"], pi + 1))
-            elif "folder" in it:
+    for pi, pg in enumerate(live["pages"]):
+        for it in pg:
+            if "folder" in it:
                 for a in list(it["apps"]):
                     opts = wanted.get(a, [])
                     if opts and ("folder", it["folder"]) not in opts and a not in [x for x, _ in loose]:
-                        outs.append({"op": "out-of-folder", "folder": it["folder"], "apps": [a], "page": pi + 1})
-                        loose.append((a, pi + 1))
+                        leaving.setdefault(it["folder"], {}).setdefault(opts[0], []).append(a)
+    ops, late = [], []
+    room = {p: free_cells(live, p) for p in range(1, len(live["pages"]) + 1)}
+    room[len(live["pages"]) + 1] = live["grid"]["cols"] * live["grid"]["rows"]  # edit mode offers one empty page
+
+    def batches():
+        """(folder, target, apps): new folders first, largest first (counting
+        the loose apps headed for the same folder), then the rest."""
+        out = [(f, t, apps) for f, by in leaving.items() for t, apps in by.items()]
+        size = lambda t, apps: len(apps) + sum(1 for a, _ in loose if t in wanted.get(a, []))
+        return sorted(out, key=lambda x: (not (x[1][0] == "folder" and x[1][1] not in live_folders), -size(x[1], x[2])))
+
+    for folder, target, apps in batches():
+        fpage = folder_on[folder]
+        if target[0] == "page":
+            dst = target[1]
+        elif target[1] in live_folders:
+            dst = folder_on[target[1]]
+        else:
+            dst = folder_page(proposal, target[1]) or fpage
+        for i in range(0, len(apps), STACK_OUT):
+            chunk = apps[i:i + STACK_OUT]
+            if room.get(dst, 0) < len(chunk):
+                dst = max(room, key=lambda p: room[p])
+                if room[dst] < len(chunk):
+                    die(f"no page has {len(chunk)} free cells for a stack out of {folder!r}")
+            ops.append({"op": "split-folder", "folder": folder, "page": fpage, "apps": chunk, "target": dst})
+            room[dst] -= len(chunk)
+            loose += [(a, dst) for a in chunk]
+        if target[0] == "folder" and target[1] not in live_folders:
+            # group right away, with every loose app headed for the same folder;
+            # what still sits in other folders joins later
+            pool = set(apps) | {a for a, _ in loose if target in wanted.get(a, [])}
+            pages = {}
+            for a, p in loose:
+                if a in pool:
+                    pages.setdefault(p, []).append(a)
+                    wanted[a].remove(target)
+            loose = [(a, p) for a, p in loose if a not in pool]
+            apps = list(apps) + sorted(pool - set(apps))
+            home = max(pages, key=lambda p: len(pages[p]))
+            ops.append({"op": "group", "page": home, "apps": pages.pop(home), "name": target[1]})
+            room[home] += len(apps) - 1
+            for page, group_apps in sorted(pages.items()):
+                ops.append({"op": "into-folder", "page": page, "apps": group_apps, "folder": target[1]})
+                room[page] += len(group_apps)
+            live_folders.add(target[1]); folder_on[target[1]] = home
+            want_page = folder_page(proposal, target[1])
+            if want_page and want_page != home:
+                late.append({"op": "move-folder", "folder": target[1], "page": home, "target": want_page})
     for app, page in loose:
         if True:
             options = wanted.get(app)
@@ -141,8 +200,10 @@ def plan(live, proposal):
             options.remove(target)
             if target != ("page", page):
                 moves.setdefault(target, {}).setdefault(page, []).append(app)
-    ops, late = list(outs), []
-    room = {p: free_cells(live, p) for p in range(1, len(live["pages"]) + 1)}
+    for name, page in folder_on.items():
+        want_page = folder_page(proposal, name)
+        if want_page and want_page != page and not any(o["op"] == "move-folder" and o["folder"] == name for o in late):
+            late.append({"op": "move-folder", "folder": name, "page": page, "target": want_page})
     for name in sorted({t[1] for t in moves if t[0] == "folder"} - live_folders):
         pages = moves.pop(("folder", name))
         total = sum(len(v) for v in pages.values())
@@ -172,17 +233,19 @@ def plan(live, proposal):
             if "folder" not in it:
                 continue
             want_order = [a for a, w in placements(proposal) if w == ("folder", it["folder"])]
-            leaving = {o["apps"][0] for o in outs if o["folder"] == it["folder"]}
-            have = [a for a in it["apps"] if a in want_order and a not in leaving]
+            gone = {a for apps in leaving.get(it["folder"], {}).values() for a in apps}
+            have = [a for a in it["apps"] if a in want_order and a not in gone]
             expect = [a for a in want_order if a in it["apps"]]
             if have != expect:
                 # the shortest tail of the wanted order whose removal leaves
                 # the rest already in place: those are the apps to drag to the end
                 tail = next((expect[-k:] for k in range(1, len(expect))
                              if [a for a in have if a not in expect[-k:]] == expect[:-k]), None)
-                if tail is None:
-                    print(f"note: folder {it['folder']!r} is ordered differently from the proposal in a way "
-                          f"a move-to-end cannot fix; left as it is", file=sys.stderr)
+                if tail is None or len(tail) > STACK:
+                    # a reorder is for an append that landed out of place (a few apps), not for
+                    # rewriting a whole folder's order one drag at a time
+                    print(f"note: folder {it['folder']!r} is ordered differently from the proposal "
+                          f"({len(tail) if tail else 'many'} apps out of place); left as it is", file=sys.stderr)
                 else:
                     late.append({"op": "reorder", "folder": it["folder"], "apps": tail, "order": expect})
     return ops + late
@@ -195,10 +258,18 @@ def lcp(a, b):
     return a[:n]
 
 
+def phone_name(name: str) -> str:
+    """What the driver can call a new folder: `input text` takes ASCII only, so
+    the ASCII part of the name, or 'Folder' when nothing is left."""
+    return name if name.isascii() else ("".join(ch for ch in name if ch.isascii()).strip() or "Folder")
+
+
 def describe(op):
     if op["op"] == "group":
-        note = "" if op["name"].isascii() else "  (name is not ASCII: the folder will be called 'Folder'; rename it by hand)"
+        note = "" if op["name"].isascii() else f"  (named {phone_name(op['name'])!r} on the phone; finish the name by hand)"
         return f"page {op['page']}: Group {len(op['apps'])} apps into a new folder {op['name']!r}{note}"
+    if op["op"] == "split-folder":
+        return f"folder {op['folder']!r}: select {len(op['apps'])} apps and drop them on page {op['target']}"
     if op["op"] == "into-folder":
         return f"page {op['page']}: carry {len(op['apps'])} apps into folder {op['folder']!r}"
     if op["op"] == "to-page":
@@ -291,6 +362,7 @@ class Driver:
         self.p, self.walk, self.live = phone, ph.Walk(phone), live
         self.folder_at = {}   # folder name -> (page, [c, r]) as last seen
         self.free = {}        # page -> set of (c, r) known empty
+        self.caption = {}     # folder name -> what the phone shows under it
         cols, rows = live["grid"]["cols"], live["grid"]["rows"]
         for pi, pg in enumerate(live["pages"]):
             used = set()
@@ -300,7 +372,31 @@ class Driver:
                 used |= {(c + i, r + j) for i in range(w) for j in range(h)}
                 if "folder" in it:
                     self.folder_at[it["folder"]] = (pi + 1, it["at"])
+                    self.caption[it["folder"]] = it.get("caption", it["folder"])
             self.free[pi + 1] = {(c, r) for c in range(cols) for r in range(rows)} - used
+
+    def normal_grid(self, scr):
+        """The normal-mode grid, measured from this screen's app icons, or
+        once from page 1 when this page has none (a page of folders only)."""
+        try:
+            self._grid = self.walk.grid(scr, scr.page()[2])
+        except SystemExit:
+            if not getattr(self, "_grid", None):
+                here = self.page_no(scr)
+                first = self.go(1)
+                self._grid = self.walk.grid(first, first.page()[2])
+                self.go(here)
+        return self._grid
+
+    def ensure_page(self, page):
+        """The layout and free-cell map up to `page`; edit mode always offers
+        one empty page past the last, which a drop on its thumbnail creates."""
+        cols, rows = self.live["grid"]["cols"], self.live["grid"]["rows"]
+        if page > len(self.live["pages"]) + 1:
+            die(f"page {page} does not exist and cannot be created in one step")
+        while len(self.live["pages"]) < page:
+            self.live["pages"].append([])
+        self.free.setdefault(page, {(c, r) for c in range(cols) for r in range(rows)})
 
     # -- reading
     def dump(self):
@@ -353,7 +449,9 @@ class Driver:
         return pg[0] if pg else None
 
     def edit_mode(self, scr):
-        return any(CHECKED.match(n["desc"]) for n in scr.launcher())
+        """Checkboxes on app icons, or the Done button: a page of folders only
+        (folders and the dock get no checkbox) still shows Done."""
+        return any(CHECKED.match(n["desc"]) or n["desc"].strip() == "Done" for n in scr.launcher())
 
     def find(self, scr, label):
         """Bounds of the icon labelled `label` on this screen (edit-mode suffix stripped)."""
@@ -378,17 +476,33 @@ class Driver:
                  and n["b"][0] <= cx <= n["b"][2] and n["b"][3] >= cb[1] - 5 and n["b"][1] < cb[1]]
         return min(cells, key=lambda b: (b[3] - b[1]) * (b[2] - b[0])) if cells else None
 
+    def popup_entries(self, scr):
+        """(label, bounds) of the open folder's icons, top to bottom. Page
+        icons behind the popup are in the dump too, on other columns; dock
+        icons share the normal-mode columns but sit below the page indicator."""
+        pg = scr.page()
+        floor = pg[2][1] if pg else scr.height
+        return [(a, b) for a, b in self.walk.popup(scr, set())[1] if b[0] in self.POP_COLS and b[3] <= floor]
+
     def popup_items(self, scr):
-        """Labels in the open folder, top to bottom. Page icons behind the
-        popup are in the dump too; the popup's columns tell them apart."""
-        items = [(a, b) for a, b in self.walk.popup(scr, set())[1] if b[0] in self.POP_COLS]
-        return [(CHECKED.match(a) or re.match(r"(.*)", a)).group(1) for a, _ in items]
+        return [(CHECKED.match(a) or re.match(r"(.*)", a)).group(1) for a, _ in self.popup_entries(scr)]
 
     def popup_bounds(self, scr, label):
-        for a, b in self.walk.popup(scr, set())[1]:
-            if b[0] in self.POP_COLS and (CHECKED.match(a) or re.match(r"(.*)", a)).group(1) == label:
+        for a, b in self.popup_entries(scr):
+            if (CHECKED.match(a) or re.match(r"(.*)", a)).group(1) == label:
                 return b
         return None
+
+    def open_folder(self, x, y, what):
+        """Tap a folder icon and make sure its popup opened (a tap right after
+        a page turn or Done is sometimes swallowed): once more if not."""
+        for attempt in (1, 2):
+            self.p.tap(x, y, wait=1.0)
+            scr = self.dump()
+            if self.popup_entries(scr):
+                return scr
+            time.sleep(0.8)
+        die(f"{what} did not open")
 
     def folder_contains(self, names, tries=6):
         """Scroll through the open folder until every name is seen."""
@@ -402,7 +516,7 @@ class Driver:
             pending -= set(items)
             if not pending:
                 return True, seen
-            full = [b for a, b in self.walk.popup(scr, set())[1] if b[0] in self.POP_COLS]
+            full = [b for a, b in self.popup_entries(scr)]
             top, bottom = min(b[1] for b in full), max(b[3] for b in full)
             row = min(b[3] - b[1] for b in full)
             cx, cy = scr.width // 2, (top + bottom) // 2
@@ -446,7 +560,7 @@ class Driver:
         of this page, or of a neighbour when this page is full."""
         self.leave_edit()
         self.go(page)
-        g = self.walk.grid(self.dump(), self.dump().page()[2])
+        g = self.normal_grid(self.dump())
         candidates = [page] + [p for d in (1, 2, 3) for p in (page - d, page + d) if p in self.free]
         for p in candidates:
             if self.free.get(p):
@@ -526,11 +640,17 @@ class Driver:
             home = (f"input motionevent MOVE {e} {CENTRE[1]}; sleep 0.5; "
                     f"input motionevent MOVE {CENTRE[0]} {CENTRE[1]}; sleep 0.7; ") * abs(start - target_page)
         back = f"{home}input motionevent MOVE {x} {y}; sleep 0.8; input motionevent UP {x} {y}; echo ABORT"
+        if start == target_page:
+            # same page: no parking at the centre (that hovers over whatever icon
+            # sits there, and the launcher then ignores the folder hover) and no
+            # page loop; straight from the pick-up to `then`
+            travel = "reached=1; "
+        else:
+            travel = f"input motionevent MOVE {CENTRE[0]} {CENTRE[1]}; sleep 0.6; " + self.page_loop(target_page, start)
         script = (
             f"input motionevent DOWN {x} {y}; sleep 0.9; "
             f"input motionevent MOVE {x + 20} {y}; sleep 0.2; "
-            f"input motionevent MOVE {CENTRE[0]} {CENTRE[1]}; sleep 0.6; "
-            + self.page_loop(target_page, start)
+            + travel
             + f"if [ $reached = 1 ]; then {then.replace('__BACK__', back)}; "
             + f"else {back}; fi"
         )
@@ -545,24 +665,58 @@ class Driver:
         local = os.path.join(self.p.work, "gesture.sh")
         with open(local, "w") as fh:
             fh.write(script + "\n")
-        self.p.adb("push", local, "/data/local/tmp/lm-gesture.sh")
-        out = self.p.adb("shell", "sh", "/data/local/tmp/lm-gesture.sh")
-        time.sleep(0.8)
-        print("   " + " ".join(out.split())[-300:], file=sys.stderr)
-        return out
+        remote, out_file = "/data/local/tmp/lm-gesture.sh", "/data/local/tmp/lm-gesture.out"
+        self.p.adb("push", local, remote)
+        # Detached from the adb session: if adb drops mid-gesture the script
+        # still runs to its UP, and its output is read once the phone is back.
+        self.p.adb("shell", f"rm -f {out_file}; (nohup sh {remote} > {out_file} 2>&1; echo __END__ >> {out_file}) "
+                            f">/dev/null 2>&1 </dev/null &")
+        end = time.time() + GESTURE_TIMEOUT
+        while time.time() < end:
+            try:
+                out = self.p.adb("shell", f"cat {out_file} 2>/dev/null", timeout=30)
+            except ph.Dropped as e:
+                print(f"   adb dropped during the gesture ({e}); the gesture goes on by itself", file=sys.stderr)
+                self.p.wait_back(240)
+                continue
+            if "__END__" in out:
+                time.sleep(0.8)
+                out = out.replace("__END__", "")
+                print("   " + " ".join(out.split())[-300:], file=sys.stderr)
+                return out
+            time.sleep(1.0)
+        die(f"the gesture did not finish within {GESTURE_TIMEOUT}s: {' '.join(out.split())[-200:]}")
 
-    # Edit-mode folder popup on this phone: 3 columns at x 239 / 513 / 786
-    # (261 px wide, 274 apart), rows 294 apart. Page icons behind it sit on a
-    # different x grid (119 / 379 / 640 / 901), which is how the two are told apart.
-    POP_COLS = (239, 513, 786)
+    # Folder popup on this phone: 3 columns at x 239 / 513 / 786 in edit mode
+    # (261 px wide, 274 apart), 177 / 493 / 809 in normal mode (301 wide, rows 339 apart).
+    # Page icons behind it sit on other x grids (119 / 379 / 640 / 901 in edit
+    # mode, 38 / 339 / 640 / 941 in normal mode), which tells the two apart.
+    POP_COLS = (239, 513, 786, 177, 493, 809)
     POP_W, POP_DX, POP_DY = 261, 274, 294
+
+    @classmethod
+    def onto_popup(cls) -> str:
+        """Shell: with the stack hovering over a folder whose popup has just
+        opened, move it onto the popup's first icon. A small folder's icons sit
+        lower on the screen (the grid is centred), so a fixed point can land on
+        empty popup space, which the launcher treats as leaving the folder."""
+        cols = "(" + "|".join(str(c) for c in cls.POP_COLS) + ")"
+        item = "bounds=\"\\[" + cols + ",[0-9]*\\]\\[[0-9]*,[0-9]*\\]\""
+        return (
+            "rm -f /data/local/tmp/lm-pop.xml; uiautomator dump /data/local/tmp/lm-pop.xml >/dev/null 2>&1; "
+            f"f=$(grep -oE 'unchecked\"[^>]*{item}' /data/local/tmp/lm-pop.xml | head -1 | grep -o 'bounds=\"[^\"]*\"' | grep -o '[0-9]*' | tr '\\n' ' '); "
+            f"if [ -n \"$f\" ]; then set -- $f; px=$((($1 + $3) / 2)); py=$((($2 + $4) / 2)); else px={POPUP_CENTRE[0]}; py={POPUP_CENTRE[1]}; echo 'popup not seen'; fi; "
+            "echo \"onto:$px,$py\"; input motionevent MOVE $px $py; sleep 0.6; "
+        )
 
     @classmethod
     def after_last(cls, last: str, max_scrolls=16) -> str:
         """Shell: with the stack held over an open folder popup, find the
         folder's last app in a UI dump, scrolling the popup by hovering at its
         bottom edge until it is on screen, then release just after it."""
-        pat = re.escape(last + ", unchecked").replace("\\ ", " ").replace("'", "'\\''")
+        # a notification badge sits between the name and the checkbox state:
+        # "Telegram X: 3 new notifications, unchecked"
+        pat = (re.escape(last).replace("\\ ", " ") + "(: [0-9]+ new notifications?)?, unchecked").replace("'", "'\\''")
         cols = "(" + "|".join(str(c) for c in cls.POP_COLS) + ")"
         item = "bounds=\"\\[" + cols + ",[0-9]*\\]\\[[0-9]*,[0-9]*\\]\""
         return (
@@ -611,7 +765,7 @@ class Driver:
         fx, fy = centre(EDIT, *fat)
         last = self.folder_entry(name)["apps"][-1]
         then = (f"input motionevent MOVE {fx} {fy}; sleep 1.4; "
-                f"input motionevent MOVE {POPUP_CENTRE[0]} {POPUP_CENTRE[1]}; sleep 0.6; "
+                + self.onto_popup()
                 + self.after_last(last))
         self.carry(self.find(scr, apps[0]), fpage, then, start=page)
         ok, seen = self.verified(lambda: self.folder_contains(apps),
@@ -662,55 +816,55 @@ class Driver:
         tx, ty = centre(EDIT, *cells[0])
         then = f"input motionevent MOVE {tx} {ty}; sleep 0.9; input motionevent UP {tx} {ty}"
         self.carry(self.find(scr, apps[0]), target, then, start=page)
-
-        def landed():
-            s = self.dump()
-            if self.page_no(s) != target:
-                return False, (s, f"at page {self.page_no(s)}")
-            missing = [a for a in apps if not self.find(s, a)]
-            return not missing, (s, f"missing {missing}" if missing else "")
-        ok, (scr, detail) = self.verified(landed, f"page {target} in edit mode showing {apps}",
+        ok, (scr, detail) = self.verified(lambda: self.landed(target, apps), f"page {target} in edit mode showing {apps}",
                                           target_page=target, target_b=[tx - 130, ty - 130, tx + 130, ty + 130])
         if not ok:  # the cells are read from the screen below, so only an absent app is a failure
             die(f"after the drop on page {target}: {detail}")
         self.take(page, apps)
-        while len(self.live["pages"]) < target:
-            self.live["pages"].append([])
-        for a in apps:
-            b = self.find(scr, a)
-            c = round((b[0] - EDIT["ox"]) / EDIT["cw"]); r = round((b[1] - EDIT["oy"]) / EDIT["ch"])
-            self.free[target].discard((c, r))
-            self.live["pages"][target - 1].append({"app": a, "at": [c, r]})
+        self.place_from_screen(scr, target, apps)
         self.leave_edit()
+
+    def captions(self, scr):
+        """Folder captions on this page (the launcher names a new folder by
+        its apps' category: 'Music', 'Games', ... or 'Folder')."""
+        pg = scr.page()
+        return {n["label"] for n in scr.launcher() if n["cls"] == "TextView" and n["label"]
+                and n["b"][3] - n["b"][1] < 100 and pg and n["b"][3] <= pg[2][1]
+                and self.folder_cell_bounds(scr, n["label"])}
 
     def group(self, op):
         page, apps, name = op["page"], op["apps"], op["name"]
+        if self.reconcile(op):
+            print("   the folder already exists from an interrupted run; recorded", file=sys.stderr)
+            return
         scr = self.enter_edit(page)
+        before = self.captions(scr)
         scr = self.select(scr, apps)
-        first = self.find(scr, apps[0])
         self.p.tap(*GROUP_BTN, wait=1.0)
         self.leave_edit()
-        self.go(page)
-        scr = self.dump()
-        fb = self.folder_cell_bounds(scr, "Folder")
-        if not fb:
-            die("no folder named 'Folder' appeared after Group")
-        g = self.walk.grid(scr, scr.page()[2])
-        at = self.walk.at(g, fb)
-        self.p.tap(*mid(fb), wait=0.8)
+        scr = self.go(page)
+        new = self.captions(scr) - before
+        if len(new) != 1:
+            die(f"after Group the page shows {sorted(new) or 'no'} new folder captions; expected one")
+        given = new.pop()
+        fb = self.folder_cell_bounds(scr, given)
+        at = self.walk.at(self.normal_grid(scr), fb)
+        self.open_folder(*mid(fb), f"the new folder {given!r}")
         ok, seen = self.folder_contains(apps)
         self.p.key("KEYCODE_BACK", 0.5)
         if not ok:
-            die(f"the new folder shows {seen}; missing {sorted(set(apps) - set(seen))}")
-        final = name if name.isascii() else "Folder"
-        if final != "Folder":
-            self.rename(fb, final)
+            die(f"the new folder {given!r} shows {seen}; missing {sorted(set(apps) - set(seen))}")
+        final = phone_name(name)
+        if final != given:
+            self.rename(fb, given, final)
+        self.caption[name] = final
         self.folder_at[name] = (page, at)
-        self.take(page, apps)
+        self.live["pages"][page - 1].append({"folder": name, "apps": list(apps), "at": list(at), "caption": final})
         self.free[page].discard(tuple(at))
-        self.live["pages"][page - 1].append({"folder": name, "apps": list(apps), "at": list(at)})
+        self.take(page, apps)  # after the append: the page is not empty
 
-    def rename(self, fb, name):
+    def rename(self, fb, current, name):
+        """Edit folder on the folder at `fb`, now called `current`: replace the name."""
         x, y = mid(fb)
         self.p.adb("shell", f"input motionevent DOWN {x} {y}; sleep 0.9; input motionevent UP {x} {y}")
         time.sleep(0.8)
@@ -720,12 +874,12 @@ class Driver:
             die("long press on the new folder did not offer 'Edit folder'")
         self.p.tap(*mid(entry["b"]), wait=1.0)
         scr = self.dump()
-        field = next((n for n in scr.launcher() if n["label"] == "Folder" and n["cls"] in ("TextView", "EditText")), None)
+        field = next((n for n in scr.launcher() if n["label"] == current and n["cls"] in ("TextView", "EditText")), None)
         if not field:
-            die("the folder editor did not show the name field")
+            die(f"the folder editor did not show the name field ({current!r})")
         self.p.tap(*mid(field["b"]), wait=0.6)
         self.p.adb("shell", "input keyevent KEYCODE_MOVE_END")
-        for _ in range(8):
+        for _ in range(len(current) + 2):
             self.p.adb("shell", "input keyevent KEYCODE_DEL")
         self.p.adb("shell", "input", "text", name)
         time.sleep(0.4)
@@ -746,7 +900,7 @@ class Driver:
         fpage, fat = self.folder_at[name]
         entry = self.folder_entry(name)
         self.enter_edit(fpage)
-        self.p.tap(*centre(EDIT, *fat), wait=0.9)
+        self.open_folder(*centre(EDIT, *fat), f"folder {name!r}")
         ok, seen = self.verified(lambda: self.folder_contains(entry["apps"], tries=12),
                                  f"folder {name!r} open in edit mode with all {len(entry['apps'])} apps", target_page=fpage)
         if not ok:
@@ -793,7 +947,7 @@ class Driver:
             if not items or items[0] == first:
                 return
             first = items[0]
-            full = [b for a, b in self.walk.popup(scr, set())[1] if b[0] in self.POP_COLS]
+            full = [b for a, b in self.popup_entries(scr)]
             top, bottom = min(b[1] for b in full), max(b[3] for b in full)
             row = min(b[3] - b[1] for b in full)
             cx, cy = scr.width // 2, (top + bottom) // 2
@@ -803,6 +957,46 @@ class Driver:
         """After adb broke mid-operation: did the gesture finish on the phone?
         For a folder drop, the apps gone from their page and present in the
         folder means yes; the layout is updated and the op counts as done."""
+        if op["op"] == "split-folder":
+            apps, name, target = op["apps"], op["folder"], op["target"]
+            self.leave_edit()
+            pg = self.dump().page()
+            if not pg or target > pg[1]:
+                return False  # the target page was never created: nothing landed
+            scr = self.go(target)
+            if not all(self.find(scr, a) for a in apps):
+                return False
+            entry = self.folder_entry(name)
+            for a in apps:
+                if a in entry["apps"]:
+                    entry["apps"].remove(a)
+            self.place_from_screen(scr, target, apps)
+            return True
+        if op["op"] == "group":
+            page, apps, name = op["page"], op["apps"], op["name"]
+            self.leave_edit()
+            scr = self.go(page)
+            if any(self.find(scr, a) for a in apps):
+                return False
+            known = set(self.caption.values())
+            for given in sorted(self.captions(scr) - known):
+                fb = self.folder_cell_bounds(scr, given)
+                self.open_folder(*mid(fb), f"folder {given!r}")
+                ok, seen = self.folder_contains(apps)
+                self.p.key("KEYCODE_BACK", 0.5)
+                if not ok:
+                    continue
+                at = self.walk.at(self.normal_grid(scr), fb)
+                final = phone_name(name)
+                if final != given:
+                    self.rename(fb, given, final)
+                self.caption[name] = final
+                self.folder_at[name] = (page, at)
+                self.live["pages"][page - 1].append({"folder": name, "apps": list(apps), "at": list(at), "caption": final})
+                self.free[page].discard(tuple(at))
+                self.take(page, apps)  # after the append: the page is not empty
+                return True
+            return False
         if op["op"] != "into-folder":
             return False
         page, apps, name = op["page"], op["apps"], op["folder"]
@@ -811,7 +1005,7 @@ class Driver:
             return False
         fpage, fat = self.folder_at[name]
         self.enter_edit(fpage)
-        self.p.tap(*centre(EDIT, *fat), wait=0.9)
+        self.open_folder(*centre(EDIT, *fat), f"folder {name!r}")
         ok, seen = self.folder_contains(apps)
         self.p.key("KEYCODE_BACK", 0.5)
         self.leave_edit()
@@ -820,6 +1014,84 @@ class Driver:
         self.take(page, apps)
         self.folder_entry(name)["apps"] += apps
         return True
+
+    def split_folder(self, op):
+        """Edit mode (experiment 13c): open the folder, tap its apps to select
+        them, scrolling the popup as needed, then pick the stack up by the last
+        one tapped and drop it on the target page's thumbnail. The launcher
+        fills that page's first free cells and switches the view to it."""
+        name, apps, target = op["folder"], op["apps"], op["target"]
+        fpage, fat = self.folder_at[name]
+        self.ensure_page(target)
+        if len(self.free[target]) < len(apps):
+            die(f"page {target} has {len(self.free[target])} free cells for {len(apps)} apps")
+        if self.reconcile(op):
+            print("   already on the target page from an interrupted run; recorded", file=sys.stderr)
+            return
+        self.enter_edit(fpage)
+        self.open_folder(*centre(EDIT, *fat), f"folder {name!r} in edit mode")
+        self.popup_top()
+        pending, last_b, seen_first = list(apps), None, None
+        for _ in range(40):
+            scr = self.dump()
+            items = self.popup_items(scr)
+            visible = [(a, self.popup_bounds(scr, a)) for a in pending]
+            visible = [(a, b) for a, b in visible if b]
+            for a, b in visible:
+                self.p.tap(*mid(b), wait=0.35)
+            if visible:
+                scr = self.dump()
+                bad = [a for a, _ in visible if not any(n["desc"] == f"{a}, checked" for n in scr.launcher())]
+                if bad:
+                    die(f"not selected after tapping in {name!r}: {bad}")
+                pending = [a for a in pending if a not in dict(visible)]
+                last_b = visible[-1][1]
+            if not pending:
+                break
+            if items and items[0] == seen_first:
+                self.p.key("KEYCODE_BACK", 0.5)
+                die(f"{pending} are not in folder {name!r}")
+            seen_first = items[0] if items else None
+            full = [b for a, b in self.popup_entries(scr)]
+            top, bottom = min(b[1] for b in full), max(b[3] for b in full)
+            row = min(b[3] - b[1] for b in full)
+            cx, cy = scr.width // 2, (top + bottom) // 2
+            self.p.swipe(cx, cy + row, cx, cy - row, wait=0.6, ms=600)
+        thumb = next((n["b"] for n in scr.launcher() if n["desc"] == f"Screen preview, page {target}"), None)
+        if not thumb:
+            die(f"no thumbnail for page {target} while {len(apps)} apps are selected")
+        x, y = mid(last_b); tx, ty = mid(thumb)
+        self.gesture(f"input motionevent DOWN {x} {y}; sleep 0.9; input motionevent MOVE {x + 20} {y}; sleep 0.3; "
+                     f"input motionevent MOVE {tx} {ty}; sleep 1.3; input motionevent UP {tx} {ty}; echo dropped")
+        # the view stays on the folder's page (measured), so look at the target page in normal mode
+        self.leave_edit()
+        ok, (scr, detail) = self.verified(lambda: self.landed(target, apps, go=True), f"page {target} showing {apps}",
+                                          target_page=target)
+        if not ok:
+            die(f"after the drop on page {target}: {detail}")
+        entry = self.folder_entry(name)
+        for a in apps:
+            entry["apps"].remove(a)
+        self.place_from_screen(scr, target, apps)
+
+    def landed(self, target, apps, go=False):
+        """(all of `apps` are on page `target`, (screen, detail))."""
+        s = self.go(target) if go else self.dump()
+        if self.page_no(s) != target:
+            return False, (s, f"at page {self.page_no(s)}")
+        missing = [a for a in apps if not self.find(s, a)]
+        return not missing, (s, f"missing {missing}" if missing else "")
+
+    def place_from_screen(self, scr, page, apps):
+        """Record `apps` on `page` at the cells the screen shows them in, on
+        the edit-mode grid or the normal one, whichever the screen is in."""
+        self.ensure_page(page)
+        g = EDIT if self.edit_mode(scr) else self.normal_grid(scr)
+        for a in apps:
+            b = self.find(scr, a)
+            c, r = self.walk.at(g, b)
+            self.free[page].discard((c, r))
+            self.live["pages"][page - 1].append({"app": a, "at": [c, r]})
 
     def move_before(self, app, target):
         """Inside the open popup (edit mode): pick `app` up and release it on
@@ -843,7 +1115,7 @@ class Driver:
         self.leave_edit()
         scr = self.go(page)
         background = {tuple(n["b"]) for n in scr.launcher()}
-        fb = self.folder_cell_bounds(scr, name if name.isascii() else "Folder")
+        fb = self.folder_cell_bounds(scr, self.caption.get(name, name))
         if not fb:
             die(f"folder {name!r} not found on page {page}")
         self.p.tap(*mid(fb), wait=0.9)
@@ -888,14 +1160,14 @@ class Driver:
             die(f"page {target} has no free cell for folder {name!r}")
         self.leave_edit()
         scr = self.go(page)
-        fb = self.folder_cell_bounds(scr, name if name.isascii() else "Folder")
+        fb = self.folder_cell_bounds(scr, self.caption.get(name, name))
         if not fb:
             die(f"folder {name!r} not found on page {page}")
         tx, ty = centre(DRAG, *cells[0])
         then = f"input motionevent MOVE {tx} {ty}; sleep 0.9; input motionevent UP {tx} {ty}"
         self.carry(fb, target, then, start=page)
         scr = self.dump()
-        if self.page_no(scr) != target or not self.folder_cell_bounds(scr, name if name.isascii() else "Folder"):
+        if self.page_no(scr) != target or not self.folder_cell_bounds(scr, self.caption.get(name, name)):
             die(f"folder {name!r} did not land on page {target}")
         self.free[target].discard(cells[0])
         self.free[page].add(tuple(self.folder_at[name][1]))
@@ -943,6 +1215,95 @@ class Driver:
 
 # ---------------------------------------------------------------- main
 
+def attempt(d: Driver, i, op, retries=2):
+    """Run one operation, surviving adb dropping mid-gesture: wait for the
+    phone, find out whether the gesture finished on it (reconcile), and if
+    not, run the operation again."""
+    for n in range(retries + 1):
+        try:
+            d.run(i, op)
+            return
+        except (ph.Dropped, ph.Failed) as e:
+            if n == retries:
+                raise
+            print(f"   adb broke mid-operation ({e}); waiting for the phone", file=sys.stderr)
+            for _ in range(3):
+                try:
+                    d.p.wait_back(240)
+                    d.leave_edit()
+                    settled = d.reconcile(op)
+                    break
+                except (ph.Dropped, ph.Failed):
+                    continue
+            else:
+                raise
+            if settled:
+                print("   the operation had completed on the phone; recorded", file=sys.stderr)
+                return
+            print("   retrying the operation", file=sys.stderr)
+
+
+class Progress:
+    """The run as `phone watch` shows it: one JSON file rewritten at every
+    change, and the control file read between operations."""
+
+    def __init__(self, proposal, ops, path="", serial=""):
+        self.doc = {"status": "running", "proposal": proposal.get("title") or proposal.get("note") or "",
+                    "path": os.path.abspath(path) if path else "", "serial": serial or "", "pid": os.getpid(),
+                    "started": datetime.datetime.now().isoformat(timespec="seconds"), "current": 0, "error": "",
+                    "ops": [{"i": i, "text": describe(op), "apps": op.get("apps", []), "state": "pending",
+                             "secs": 0, "dumps": 0} for i, op in enumerate(ops, 1)]}
+        if os.path.exists(CONTROL):
+            os.remove(CONTROL)
+        self.write()
+
+    def write(self):
+        self.doc["updated"] = datetime.datetime.now().isoformat(timespec="seconds")
+        tmp = PROGRESS + ".tmp"
+        with open(tmp, "w") as fh:
+            json.dump(self.doc, fh, ensure_ascii=False)
+        os.replace(tmp, PROGRESS)
+
+    def set(self, i, **fields):
+        self.doc["ops"][i - 1].update(fields)
+        self.write()
+
+    def status(self, status, error=""):
+        self.doc["status"], self.doc["error"] = status, error
+        self.write()
+
+    def wait_if_told(self) -> bool:
+        """Between operations: block while the control file says pause;
+        False when it says stop. `phone watch` writes it; so does `phone op`."""
+        told = lambda: open(CONTROL).read().strip() if os.path.exists(CONTROL) else ""
+        if told() == "pause":
+            print("   paused", file=sys.stderr)
+            self.status("paused")
+            while told() == "pause":
+                time.sleep(1)
+            if told() != "stop":
+                self.status("running")
+        if told() == "stop":
+            print("   stopped by request", file=sys.stderr)
+            return False
+        return True
+
+
+class Tee:
+    """stderr that also lands in the run log, for `phone watch`."""
+
+    def __init__(self, stream, path):
+        self.stream, self.fh = stream, open(path, "a")
+
+    def write(self, text):
+        self.stream.write(text)
+        self.fh.write(text)
+        self.fh.flush()
+
+    def flush(self):
+        self.stream.flush()
+
+
 def fresh_dump(serial):
     """A live layout, read now, without saving a snapshot."""
     class A:
@@ -977,6 +1338,8 @@ def record(live, proposal, finished):
     live["date"], live["time"] = now.date().isoformat(), now.strftime("%H:%M")
     for pg in live["pages"]:
         pg.sort(key=lambda e: (e["at"][1], e["at"][0]))
+    while live["pages"] and not live["pages"][-1]:  # a page offered but never filled
+        live["pages"].pop()
     if finished:
         live["note"] = "applied: " + (proposal.get("note") or proposal.get("title") or "the proposal")
         path = os.path.join(ph.LAYOUTS, f"{now:%Y-%m-%d-%H%M}.json")
@@ -1031,35 +1394,35 @@ def main():
     phone = ph.Phone(serial, work, known=ph.load_icons())
     phone.want_icons = False
     d = Driver(phone, live)
+    sys.stderr = Tee(sys.stderr, RUN_LOG)
+    progress = Progress(proposal, ops, args.proposal, phone.serialno or serial)  # the hardware serial: it survives port changes
     if args.unlock:
         d.set_lock(False)
-    done = 0
+    done, outcome = 0, "done"
     try:
         for i, op in enumerate(ops[:args.max_ops], 1):
+            if not progress.wait_if_told():
+                outcome = "stopped"
+                break
             print(f"-- {i}/{len(ops)} {describe(op)}", file=sys.stderr)
-            for attempt in (1, 2):
-                try:
-                    d.run(i, op)
-                    break
-                except (ph.Dropped, ph.Failed) as e:
-                    if attempt == 2:
-                        raise
-                    print(f"   adb broke mid-operation ({e}); waiting for the phone", file=sys.stderr)
-                    for _ in range(3):
-                        try:
-                            phone.wait_back(240)
-                            d.leave_edit()
-                            settled = d.reconcile(op)
-                            break
-                        except (ph.Dropped, ph.Failed):
-                            continue
-                    else:
-                        raise
-                    if settled:
-                        print("   the operation had completed on the phone; recorded", file=sys.stderr)
-                        break
-                    print("   retrying the operation", file=sys.stderr)
+            progress.doc["current"] = i
+            progress.set(i, state="running")
+            t0, d0 = time.monotonic(), getattr(d, "dumps", 0)
+            try:
+                attempt(d, i, op)
+            except KeyboardInterrupt:
+                progress.set(i, state="pending", secs=0)
+                progress.status("stopped", "interrupted from the terminal; the record is kept, run again to continue")
+                outcome = "failed"  # the status is already written
+                raise
+            except BaseException as e:
+                progress.set(i, state="failed", secs=round(time.monotonic() - t0), dumps=d.dumps - d0)
+                progress.status("failed", str(e) or type(e).__name__)
+                outcome = "failed"
+                raise
+            progress.set(i, state="done", secs=round(time.monotonic() - t0), dumps=d.dumps - d0)
             done += 1
+            record(d.live, proposal, finished=False)  # after every op: a kill loses nothing
     finally:
         try:
             d.leave_edit()
@@ -1071,6 +1434,8 @@ def main():
         shutil.rmtree(work, ignore_errors=True)
         if done:
             record(d.live, proposal, finished=not plan(d.live, proposal))
+        if outcome != "failed":
+            progress.status(outcome)
     print(f"done: {done} of {len(ops)} operations", file=sys.stderr)
     return 0
 

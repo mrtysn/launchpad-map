@@ -22,6 +22,11 @@ USAGE
   launchpad-map phone write PROPOSAL [--dry-run] [--from SNAPSHOT] [--max-ops N]
   launchpad-map phone usage [--json] [--save] [--serial SERIAL]
   launchpad-map phone reorg REORG.json [--title T] [--note N] > layouts/phone/proposal-N.json
+  launchpad-map phone op   peek | go PAGE | read FOLDER | split FOLDER --to PAGE APP... |
+                           group PAGE NAME APP... | into FOLDER APP... | to-page PAGE APP... |
+                           move-folder FOLDER --to PAGE | reorder FOLDER APP... | lock on|off |
+                           pause | resume | stop
+  launchpad-map phone watch [--port N] [--open]
   launchpad-map --help
 
 COMMANDS
@@ -91,7 +96,9 @@ case "${1-}" in
       write)   shift; exec python3 "$LIB/phone_write.py" "$@" ;;
       usage)   shift; exec python3 "$LIB/phone_usage.py" "$@" ;;
       reorg)   shift; exec python3 "$LIB/phone_reorg.py" "$@" ;;
-      *) print -u2 "launchpad-map: phone takes dump, history, write, usage or reorg"; exit 64 ;;
+      op)      shift; exec python3 "$LIB/phone_op.py" "$@" ;;
+      watch)   shift; exec python3 "$LIB/phone_watch.py" "$@" ;;
+      *) print -u2 "launchpad-map: phone takes dump, history, write, usage, reorg, op or watch"; exit 64 ;;
     esac
     ;;
   open)

@@ -59,8 +59,11 @@ def die(msg: str):
 
 
 class Dropped(Exception):
-    """The phone left adb mid-walk. Wireless debugging goes off whenever the
-    phone changes networks, and comes back within about half a minute."""
+    """The phone left adb mid-walk. Android switches wireless debugging off
+    on every Wi-Fi network change (a band switch counts) and the keeper app
+    on the phone turns it back on within seconds, on a new port; adb's own
+    mDNS cache then keeps dialling the old port. `reconnect` follows the
+    phone by its hardware serial instead."""
 
 
 class Failed(Exception):
@@ -68,7 +71,9 @@ class Failed(Exception):
     (uiautomator cannot always get an idle UI to dump)."""
 
 
-DROP = re.compile(r"device offline|device '.*' not found|no devices")
+DROP = re.compile(r"device offline|device '.*' not found|no devices|failed to connect|error: closed|protocol fault")
+ADB_TIMEOUT = 150  # s; the longest gesture script (a folder append with 16 popup scrolls) stays under this
+HW_SERIAL = re.compile(r"^adb-([A-Za-z0-9]+)-[^-]+\._adb-tls-connect")
 
 
 class Phone:
@@ -100,10 +105,13 @@ class Phone:
         self.adb("pull", f"{self.REMOTE}/{name}.png", path)
         return path
 
-    def adb(self, *args, binary=False):
-        proc = subprocess.run(["adb", "-s", self.serial, *args], capture_output=True)
+    def adb(self, *args, binary=False, timeout=ADB_TIMEOUT):
+        try:
+            proc = subprocess.run(["adb", "-s", self.serial, *args], capture_output=True, timeout=timeout)
+        except subprocess.TimeoutExpired:
+            raise Dropped(f"adb {' '.join(args[:3])} gave no answer in {timeout}s")
         if proc.returncode != 0 and DROP.search(proc.stderr.decode(errors="replace")):
-            raise Dropped()
+            raise Dropped(proc.stderr.decode(errors="replace").strip()[:120])
         if proc.returncode != 0:
             why = (proc.stderr + proc.stdout).decode(errors="replace").strip()
             raise Failed(f"adb {' '.join(args[:3])} failed: {why[:300]}")
@@ -124,17 +132,24 @@ class Phone:
         time.sleep(wait)
 
     def wait_back(self, seconds=90):
-        """Wait for this phone to return after a drop, under whatever name adb
-        lists it (mDNS name or IP:port), with other devices attached too."""
+        """Get this phone back after a drop: first whatever adb lists it as
+        (mDNS name or ip:port), else by dialling its current port through
+        `reconnect`, until `seconds` have passed."""
         print(f"phone dropped off adb; waiting up to {seconds}s", file=sys.stderr)
+        hw = self.serialno or hardware_serial(self.serial)
         end = time.time() + seconds
         while time.time() < end:
             time.sleep(3)
             for s in connected():
-                if s == self.serial or (self.serialno and self.serialno in s) or self.is_me(s):
+                if s == self.serial or (hw and hw in s) or self.is_me(s):
                     self.serial = s
                     print(f"phone is back as {s}", file=sys.stderr)
                     return
+            got = reconnect(hw)
+            if got:
+                self.serial = got
+                print(f"phone reattached as {got}", file=sys.stderr)
+                return
         die(f"the phone did not come back within {seconds}s")
 
     def is_me(self, serial) -> bool:
@@ -175,6 +190,7 @@ class Phone:
                 remote = f"{self.REMOTE}/{name}.png"
                 self.adb("shell", f"mkdir -p {self.REMOTE} && screencap -p {remote}")
                 scr.remote = remote
+                scr.serial = self.serialno or self.serial
                 self.pulls.submit(self.pull, remote, scr.png)
         return scr
 
@@ -273,7 +289,14 @@ def crop(spec) -> str:
     if spec is None or isinstance(spec, str):
         return spec
     if not os.path.exists(spec["png"]) and spec.get("remote"):
-        subprocess.run(["adb", "pull", spec["remote"], spec["png"]], capture_output=True)
+        # the phone that took the screenshot, whatever adb calls it now
+        serial = spec.get("serial") or os.environ.get("ANDROID_SERIAL") or ""
+        got = reconnect(hardware_serial(serial)) if serial and serial not in connected() else serial
+        cmd = ["adb"] + (["-s", got] if got else []) + ["pull", spec["remote"], spec["png"]]
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=60)
+        except subprocess.TimeoutExpired:
+            pass
     b, dock = spec["b"], spec.get("dock")
     cw, ch = b[2] - b[0], b[3] - b[1]
     size = round(cw * (0.66 if dock else 0.59))
@@ -301,7 +324,7 @@ class Walk:
         if label in self.phone.known and not scr.png:
             return None
         self.phone.known.add(label)
-        return {"png": scr.png, "remote": scr.remote, "b": list(b), "dock": dock}
+        return {"png": scr.png, "remote": scr.remote, "serial": getattr(scr, "serial", ""), "b": list(b), "dock": dock}
 
     def grid(self, scr: Screen, indicator):
         """Cell size and origin, from the one-cell icons on screen."""
@@ -438,13 +461,49 @@ def inside(b, outer):
 
 
 def connected():
-    out = subprocess.run(["adb", "devices"], capture_output=True, text=True).stdout
+    try:
+        out = subprocess.run(["adb", "devices"], capture_output=True, text=True, timeout=20).stdout
+    except subprocess.TimeoutExpired:
+        return []
     return [l.split()[0] for l in out.splitlines()[1:] if l.strip().endswith("device")]
 
 
+def hardware_serial(serial: str) -> str:
+    """The phone's own serial number from an adb serial: an mDNS name carries
+    it (adb-<serial>-<suffix>...), a bare serial is one, an ip:port is not."""
+    m = HW_SERIAL.match(serial or "")
+    if m:
+        return m.group(1)
+    return serial if serial and re.fullmatch(r"[A-Za-z0-9]{6,}", serial) else ""
+
+
+def reconnect(hw: str) -> str:
+    """Get adb attached to the phone with hardware serial `hw`, wherever it
+    is now, and return the serial to pass to `adb -s`; "" when it cannot.
+    Delegates to `adb-reconnect --serial` (the tools repo), which tries adb's
+    mDNS list, then a fresh Bonjour lookup of the current port, then the
+    device's saved address, and never restarts the adb server."""
+    if not hw or not shutil.which("adb-reconnect"):
+        return ""
+    try:
+        out = subprocess.run(["adb-reconnect", "--serial", hw], capture_output=True, text=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    got = out.stdout.strip().splitlines()
+    return got[-1] if out.returncode == 0 and got else ""
+
+
 def pick_serial(wanted):
+    """The adb serial to drive: `wanted` when adb has it, else the same
+    phone wherever it is now; with nothing wanted, the one connected device."""
     if wanted:
-        return wanted
+        if wanted in connected():
+            return wanted
+        got = reconnect(hardware_serial(wanted))
+        if got:
+            print(f"phone attached as {got}", file=sys.stderr)
+            return got
+        die(f"{wanted} is not connected and could not be reached")
     ready = connected()
     if len(ready) != 1:
         die(f"expected exactly one connected device, found {len(ready)}; pass --serial")

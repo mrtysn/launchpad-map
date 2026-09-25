@@ -106,7 +106,7 @@ def main() -> int:
             text = fh.read()
     else:
         text = subprocess.run(["adb", "-s", ph.pick_serial(args.serial), "shell", "dumpsys", "usagestats"],
-                              capture_output=True, text=True, check=True).stdout
+                              capture_output=True, text=True, check=True, timeout=60).stdout
     stats = parse(text)
     if not stats:
         raise SystemExit("launchpad-map phone usage: no per-package stats in the dump")
