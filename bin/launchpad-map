@@ -27,7 +27,8 @@ USAGE
                            move-folder FOLDER --to PAGE | reorder FOLDER APP... | lock on|off |
                            pause | resume | stop
   launchpad-map phone watch [--port N] [--open]
-  launchpad-map tablet dump|history|write|usage|reorg|op|watch ...
+  launchpad-map phone status                  # one JSON line: attached, awake, locked, ready
+  launchpad-map tablet dump|history|write|usage|reorg|op|watch|status ...
   launchpad-map --help
 
 COMMANDS
@@ -105,7 +106,8 @@ case "${1-}" in
       reorg)   shift; exec python3 "$LIB/phone_reorg.py" "$@" ;;
       op)      shift; exec python3 "$LIB/phone_op.py" "$@" ;;
       watch)   shift; exec python3 "$LIB/phone_watch.py" "$@" ;;
-      *) print -u2 "launchpad-map: $LAUNCHPAD_MAP_DEVICE takes dump, history, write, usage, reorg, op or watch"; exit 64 ;;
+      status)  shift; exec python3 "$LIB/phone_status.py" "$@" ;;
+      *) print -u2 "launchpad-map: $LAUNCHPAD_MAP_DEVICE takes dump, history, write, usage, reorg, op, watch or status"; exit 64 ;;
     esac
     ;;
   open)
