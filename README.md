@@ -32,6 +32,22 @@ A proposal is a layout with `"draft": true`, plus an optional `"note"`. It is
 shown after the snapshots until `write` applies it, which removes the draft. `layouts/*.json` is gitignored: a snapshot is an
 inventory of one machine's apps.
 
+## Home Screens app
+
+`app/bundle.sh` builds **Home Screens** into `~/Applications`: the history page
+in a window, with the device picked in the toolbar (Mac, Phone, Tablet) and the
+commands that feed it one click away.
+
+- **Scan** runs that device's `dump --save` and re-renders the page. For the
+  phone and tablet it is enabled only while the device is attached, awake and
+  unlocked (`launchpad-map phone status`), since a scan drives the screen.
+- **Apply Proposal…** lists the device's drafts and, after a confirmation, runs
+  `write` on the one picked.
+- Progress shows in the bar at the bottom; **Log** shows every line.
+
+The app runs the commands of the checkout it was built from, so rebuild it with
+`app/bundle.sh` after changing the app; changes to the commands need no rebuild.
+
 ## Showcase
 
 `launchpad-map showcase` renders the newest snapshot with only the apps you have
