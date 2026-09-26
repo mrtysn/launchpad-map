@@ -43,6 +43,19 @@ KIND = os.environ.get("LAUNCHPAD_MAP_DEVICE", "phone")
 if KIND not in ("phone", "tablet"):
     raise SystemExit(f"launchpad-map: LAUNCHPAD_MAP_DEVICE must be phone or tablet, not {KIND!r}")
 LAYOUTS = os.path.join(REPO, "layouts", KIND)
+# What differs between the phone (portrait, 4x7) and the tablet (landscape,
+# 6x4), measured from each one's screenshots and UI dumps:
+#   title   an open folder's title is wider than this share of the screen
+#   folder  a folder screen's [cols, rows]; longer folders scroll
+#   crop    the icon within its cell, as (size / cell width, top / cell
+#           height) on a home page, in an open folder, and in the dock,
+#           where it is centred
+LOOK = {
+    "phone": {"title": 0.5, "folder": [3, 5],
+              "crop": {"cell": (0.59, 0.11), "folder": (0.59, 0.11), "dock": (0.66, None)}},
+    "tablet": {"title": 0.35, "folder": [4, 3],
+               "crop": {"cell": (0.434, 0.28), "folder": (0.5, 0.252), "dock": (0.84, None)}},
+}[KIND]
 ICONS = os.path.join(LAYOUTS, "icons.json")
 # Pages read so far, so a failed walk resumes instead of starting over.
 PROGRESS = os.path.join(LAYOUTS, ".progress")
@@ -56,7 +69,9 @@ MIRROR_TITLE = "launchpad-map"
 # A badge is announced in the label: "Clock: 1 new notification". Anything else
 # after a colon is part of the name ("Termux:Widget").
 BADGE = re.compile(r"\s*:\s*\d+ new notifications?$")
-PAGE_OF = re.compile(r"^Page (\d+) of (\d+)")
+# The tablet announces it in place of the name: "2 unread message from Google".
+UNREAD = re.compile(r"^\d+ unread messages? from (.+)$")
+PAGE_OF = re.compile(r"^Page (\d+)(?: of|\. Total pages:) (\d+)")  # phone; tablet
 
 
 def die(msg: str):
@@ -188,7 +203,7 @@ class Phone:
             fh.write(xml)
         scr = Screen(ET.fromstring(xml), None)
         if self.want_icons and any(n["label"] not in self.known and n["cls"] == "TextView" and n["b"][3] - n["b"][1] >= 100
-               and n["b"][2] - n["b"][0] < scr.width * 0.5  # not a folder's title bar
+               and n["b"][2] - n["b"][0] < scr.width * LOOK["title"]  # not a folder's title bar
                for n in scr.launcher()):
             scr.png = os.path.join(self.work, f"{name}.png")
             if not (self.mirror and self.mirror.frame(scr.png)):
@@ -271,7 +286,7 @@ class Screen:
             self.nodes.append({
                 "cls": n.get("class", "").rsplit(".", 1)[-1],
                 "pkg": n.get("package"),
-                "label": BADGE.sub("", desc).strip(),
+                "label": UNREAD.sub(r"\1", BADGE.sub("", desc).strip()),
                 "desc": desc,
                 "b": b,
             })
@@ -302,10 +317,12 @@ def crop(spec) -> str:
             subprocess.run(cmd, capture_output=True, timeout=60)
         except subprocess.TimeoutExpired:
             pass
-    b, dock = spec["b"], spec.get("dock")
+    b = spec["b"]
+    where = spec.get("where") or ("dock" if spec.get("dock") else "cell")
     cw, ch = b[2] - b[0], b[3] - b[1]
-    size = round(cw * (0.66 if dock else 0.59))
-    top = (ch - size) // 2 if dock else round(ch * 0.11)
+    ratio, at = LOOK["crop"][where]
+    size = round(cw * ratio)
+    top = (ch - size) // 2 if at is None else round(ch * at)
     x = b[0] + (cw - size) // 2
     fd, out = tempfile.mkstemp(suffix=".png")
     os.close(fd)
@@ -323,13 +340,14 @@ class Walk:
     def __init__(self, phone: Phone):
         self.phone = phone
 
-    def icon(self, scr, b, label, dock=False):
+    def icon(self, scr, b, label, dock=False, folder=False):
         """Where the icon is; the walk moves on and crops them all at the end.
         None when this screen needed no screenshot: the icon is already known."""
         if label in self.phone.known and not scr.png:
             return None
         self.phone.known.add(label)
-        return {"png": scr.png, "remote": scr.remote, "serial": getattr(scr, "serial", ""), "b": list(b), "dock": dock}
+        return {"png": scr.png, "remote": scr.remote, "serial": getattr(scr, "serial", ""), "b": list(b), "dock": dock,
+                "where": "dock" if dock else "folder" if folder else "cell"}
 
     def grid(self, scr: Screen, indicator):
         """Cell size and origin, from the one-cell icons on screen."""
@@ -339,7 +357,10 @@ class Walk:
             die("no app icons on the first page to measure the grid from")
         cw = sorted(b[2] - b[0] for b in cells)[len(cells) // 2]
         ch = sorted(b[3] - b[1] for b in cells)[len(cells) // 2]
-        cols, rows = round(scr.width / cw), indicator[1] // ch
+        # The grid is centred; its columns span the screen less the narrower
+        # side margin (the tablet leaves wide ones, the phone almost none).
+        margin = min(min(b[0] for b in cells), scr.width - max(b[2] for b in cells))
+        cols, rows = round((scr.width - 2 * margin) / cw), indicator[1] // ch
         return {"cw": cw, "ch": ch, "cols": cols, "rows": rows,
                 "ox": (scr.width - cols * cw) // 2, "oy": indicator[1] - rows * ch}
 
@@ -394,7 +415,7 @@ class Walk:
             nb = tuple(n["b"])
             if not n["label"] or nb in background or n["cls"] not in ("TextView", "EditText"):
                 continue
-            if (nb[2] - nb[0]) > scr.width * 0.5:
+            if (nb[2] - nb[0]) > scr.width * LOOK["title"]:
                 title = title or n["label"]
             elif (nb[3] - nb[1]) >= 100:  # shorter ones are captions under icons behind
                 items.append((n["label"], nb))
@@ -423,9 +444,10 @@ class Walk:
             k = overlap(labels, [a for a, _ in full])
             fresh = full[k:]
             for label, nb in fresh:
-                apps.append((label, self.icon(scr, nb, label)))
-            if not fresh or (not labels and len(full) < 15):  # nothing new, or it all fits
-                break
+                apps.append((label, self.icon(scr, nb, label, folder=True)))
+            cols, rows = LOOK["folder"]
+            if not fresh or (not labels and (len(full) < cols * rows or len(full) % cols)):
+                break  # nothing new, or it all fits: fewer than a screenful, or a part-filled last row
             # Scroll by two rows with a steady drag through the middle of the
             # folder: a fling from near its edge closes the folder instead.
             left, right = min(x_[1][0] for x_ in full), max(x_[1][2] for x_ in full)
@@ -450,7 +472,7 @@ class Walk:
 def folder_open(scr: Screen) -> bool:
     """An open folder shows its name as a title wider than any home-screen label."""
     return any(n["cls"] in ("TextView", "EditText") and n["label"]
-               and (n["b"][2] - n["b"][0]) > scr.width * 0.6 for n in scr.launcher())
+               and (n["b"][2] - n["b"][0]) > scr.width * LOOK["title"] for n in scr.launcher())
 
 
 def overlap(have, seen):
@@ -596,7 +618,7 @@ def dump_to(args, serial) -> int:
     doc = {"device": model, "date": now.date().isoformat(), "time": now.strftime("%H:%M")}
     if args.note:
         doc["note"] = args.note
-    doc["grid"] = {"cols": g["cols"], "rows": g["rows"], "folder": [3, 5]}
+    doc["grid"] = {"cols": g["cols"], "rows": g["rows"], "folder": LOOK["folder"]}
     doc["dock"] = [label for label, _ in dock]
     icons = dict(load_icons())
     for label, uri in dock:
