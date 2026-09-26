@@ -18,7 +18,7 @@ launchpad-map write layouts/proposed.json --dry-run
 
 ```
 launchpad-map dump --save                   # add the live layout to the history
-launchpad-map history                       # render every snapshot to launchpad-history.html
+launchpad-map history                       # every device's snapshots on one page, history.html
 ```
 
 The history is the dated files in `layouts/` (`YYYY-MM-DD-HHMM.json`), shown by date and time.

@@ -291,6 +291,7 @@ class Screen:
                 "b": b,
             })
         self.width = max((n["b"][2] for n in self.nodes if len(n["b"]) == 4), default=0)
+        self.height = max((n["b"][3] for n in self.nodes if len(n["b"]) == 4), default=0)
 
     def launcher(self):
         return [n for n in self.nodes if n["pkg"] == LAUNCHER and len(n["b"]) == 4]
@@ -361,8 +362,18 @@ class Walk:
         # side margin (the tablet leaves wide ones, the phone almost none).
         margin = min(min(b[0] for b in cells), scr.width - max(b[2] for b in cells))
         cols, rows = round((scr.width - 2 * margin) / cw), indicator[1] // ch
-        return {"cw": cw, "ch": ch, "cols": cols, "rows": rows,
-                "ox": (scr.width - cols * cw) // 2, "oy": indicator[1] - rows * ch}
+        g = {"cw": cw, "ch": ch, "cols": cols, "rows": rows,
+             "ox": (scr.width - cols * cw) // 2, "oy": indicator[1] - rows * ch}
+        # Where things sit on the screen, so the viewer can draw it to shape.
+        dock = [n["b"] for n in scr.launcher() if n["cls"] == "TextView" and n["label"] and n["b"][1] >= indicator[3]]
+        g["geometry"] = {
+            "screen": [scr.width, scr.height],
+            "box": [g["ox"], g["oy"], g["ox"] + cols * cw, indicator[1]],
+            "dock": [min(b[0] for b in dock), min(b[1] for b in dock), max(b[2] for b in dock), max(b[3] for b in dock)]
+            if dock else None,
+            "icon": round(cw * LOOK["crop"]["cell"][0]),
+        }
+        return g
 
     def at(self, g, b):
         return [round((b[0] - g["ox"]) / g["cw"]), round((b[1] - g["oy"]) / g["ch"])]
@@ -618,7 +629,7 @@ def dump_to(args, serial) -> int:
     doc = {"device": model, "date": now.date().isoformat(), "time": now.strftime("%H:%M")}
     if args.note:
         doc["note"] = args.note
-    doc["grid"] = {"cols": g["cols"], "rows": g["rows"], "folder": LOOK["folder"]}
+    doc["grid"] = {"cols": g["cols"], "rows": g["rows"], "folder": LOOK["folder"], **g.get("geometry", {})}
     doc["dock"] = [label for label, _ in dock]
     icons = dict(load_icons())
     for label, uri in dock:

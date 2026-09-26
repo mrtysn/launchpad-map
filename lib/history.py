@@ -27,16 +27,17 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import dump  # noqa: E402
+import render  # noqa: E402
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LAYOUTS = os.path.join(REPO, "layouts")
-PAGE = os.path.join(REPO, "launchpad-history.html")
+PAGE = os.path.join(REPO, "history.html")
 REVIEW = os.path.join(REPO, "showcase.json")
 SHOWCASE = os.path.join(REPO, "showcase.html")
-# An Android device's snapshots; `launchpad-map tablet history` picks the tablet's.
-KIND = os.environ.get("LAUNCHPAD_MAP_DEVICE", "phone")
-PHONE = os.path.join(LAYOUTS, KIND)
-PHONE_PAGE = os.path.join(REPO, f"{KIND}-history.html")
+# Every device on the one history page, in switcher order: (id, label, snapshot
+# directory). The Android devices keep their snapshots in layouts/<id>/.
+DEVICES = [("mac", "Mac", LAYOUTS), ("phone", "Phone", os.path.join(LAYOUTS, "phone")),
+           ("tablet", "Tablet", os.path.join(LAYOUTS, "tablet"))]
 
 
 def live_pages(db=None) -> list:
@@ -87,9 +88,26 @@ def collect(directory=LAYOUTS) -> list:
             continue
         with open(path) as fh:
             doc = json.load(fh)
+        if not isinstance(doc, dict) or not isinstance(doc.get("pages"), list):
+            continue  # an Android device's icons, usage, categories or reorg plan
         key = (doc.get("date") or "", doc.get("time") or "", bool(doc.get("draft")), os.path.basename(path))
         layouts.append((key, path))
     return [p for _, p in sorted(layouts)]
+
+
+def device_part(dev, label, directory):
+    """One device's data for the page; None when it has no snapshots."""
+    layouts = collect(directory)
+    docs = [json.load(open(p)) for p in layouts]
+    if not any(not d.get("draft") for d in docs):
+        return None
+    if dev == "mac":
+        part = render.device_data(docs, review_path=REVIEW if os.path.exists(REVIEW) else None)
+    else:
+        usage = os.path.join(directory, "usage.json")  # from `phone usage --save`
+        part = render.device_data(docs, icons_path=os.path.join(directory, "icons.json"), name="Home screen",
+                                  usage_path=usage if os.path.exists(usage) else None)
+    return {"id": dev, "label": label, **part}
 
 
 def main() -> int:
@@ -102,42 +120,33 @@ def main() -> int:
     ap.add_argument("--out", "-o", default=SHOWCASE if showcase else PAGE,
                     help="HTML file to write (default: in the repo)")
     ap.add_argument("--open", action="store_true", help="open the page when done")
-    ap.add_argument("--phone", action="store_true", help=f"the {KIND}'s snapshots in layouts/{KIND}/, "
-                    f"to {KIND}-history.html")
+    ap.add_argument("--device", choices=[d for d, _, _ in DEVICES],
+                    help="the device --open shows first (default: the one last viewed)")
     args = ap.parse_args(sys.argv[2:] if showcase else sys.argv[1:])
-    if args.phone and showcase:
-        raise SystemExit("launchpad-map: the showcase covers Launchpad only")
-    if args.phone and args.out == PAGE:
-        args.out = PHONE_PAGE
 
-    layouts = collect(PHONE if args.phone else LAYOUTS)
-    snaps = [p for p in layouts if not json.load(open(p)).get("draft")]
-    if not snaps:
-        raise SystemExit("launchpad-map: no snapshots yet; run `launchpad-map "
-                         + (f"{KIND} dump" if args.phone else "dump") + " --save`")
-    cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "render.py"),
-           "--out", args.out]
-    if args.phone:
-        cmd += ["--icons", os.path.join(PHONE, "icons.json"), "--name", "Home screen"]
-        if os.path.exists(os.path.join(PHONE, "usage.json")):  # from `phone usage --save`
-            cmd += ["--usage", os.path.join(PHONE, "usage.json")]
-        for path in layouts:
-            cmd += ["--layout", path]
-    elif showcase:
+    if showcase:
+        snaps = [p for p in collect(LAYOUTS) if not json.load(open(p)).get("draft")]
+        if not snaps:
+            raise SystemExit("launchpad-map: no snapshots yet; run `launchpad-map dump --save`")
         if not os.path.exists(REVIEW):
             raise SystemExit(f"launchpad-map: no {REVIEW}; copy showcase.example.json")
-        cmd += ["--showcase", REVIEW, "--layout", snaps[-1]]
+        parts = [{"id": "mac", "label": "Mac",
+                  **render.device_data([json.load(open(snaps[-1]))], showcase_path=REVIEW)}]
     else:
-        if os.path.exists(REVIEW):
-            cmd += ["--review", REVIEW]
-        for path in layouts:
-            cmd += ["--layout", path]
-    rc = subprocess.run(cmd).returncode
-    if rc == 0:
-        print(args.out)
-        if args.open:
-            subprocess.run(["open", args.out], check=False)
-    return rc
+        parts = [p for p in (device_part(*d) for d in DEVICES) if p]
+        if not parts:
+            raise SystemExit("launchpad-map: no snapshots yet; run `launchpad-map dump --save`, "
+                             "`launchpad-map phone dump --save` or `launchpad-map tablet dump --save`")
+    with open(args.out, "w") as fh:
+        fh.write(render.page(parts))
+    render.report(args.out, parts)
+    print(args.out)
+    if args.open:
+        url = "file://" + os.path.abspath(args.out) + (f"#{args.device}" if args.device else "")
+        # `open` drops a file URL's fragment; hand the URL to the default browser instead.
+        subprocess.run(["osascript", "-e", f'open location "{url}"'] if args.device else ["open", args.out],
+                       check=False)
+    return 0
 
 
 if __name__ == "__main__":

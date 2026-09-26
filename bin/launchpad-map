@@ -11,7 +11,7 @@ launchpad-map — inspect and visualise the macOS Launchpad layout
 
 USAGE
   launchpad-map dump   [--out FILE] [--title TEXT] [--date YYYY-MM-DD] [--db PATH] [--save]
-  launchpad-map history [--out FILE] [--open]
+  launchpad-map history [--out FILE] [--open] [--device mac|phone|tablet]
   launchpad-map showcase [--out FILE] [--open]
   launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
   launchpad-map open   [--layout FILE]...
@@ -44,8 +44,9 @@ COMMANDS
 
   open     Render to a temporary file and open it in the default browser.
 
-  history  Render every snapshot in layouts/, oldest first and drafts last,
-           to launchpad-history.html in the repo. `dump --save` adds a
+  history  Render every device's snapshots — the Mac's Launchpad, the phone,
+           the tablet — to one page, history.html in the repo, with a switcher
+           between them; oldest first and drafts last. `dump --save` adds a
            snapshot by hand; `write` adds one for each layout it applies.
 
   showcase Render the newest snapshot with only the apps showcase.json
@@ -60,13 +61,13 @@ COMMANDS
   phone    The Android phone's home screen, read over adb (HyperOS launcher).
            `phone dump` walks every page and folder, reading labels from the
            UI hierarchy and cropping icons from screenshots; --save adds it
-           to layouts/phone/. `phone history` renders those snapshots to
-           phone-history.html. The only input sent to the phone is HOME,
-           BACK, page swipes and taps on folder icons.
+           to layouts/phone/. `phone history` is `history`, opening on the
+           phone with --open. The only input sent to the phone is HOME, BACK,
+           page swipes and taps on folder icons.
 
   tablet   The same commands for the Android tablet, kept apart in
-           layouts/tablet/ and tablet-history.html. With the phone and the
-           tablet both attached, each command picks its own device.
+           layouts/tablet/. With the phone and the tablet both attached, each
+           command picks its own device.
 
   inventory
            Cross-reference a saved app inventory (Mac App Store / Homebrew
@@ -98,7 +99,7 @@ case "${1-}" in
     shift
     case "${1-}" in
       dump)    shift; exec python3 "$LIB/phone.py" "$@" ;;
-      history) shift; exec python3 "$LIB/history.py" --phone "$@" ;;
+      history) shift; exec python3 "$LIB/history.py" --device "$LAUNCHPAD_MAP_DEVICE" "$@" ;;
       write)   shift; exec python3 "$LIB/phone_write.py" "$@" ;;
       usage)   shift; exec python3 "$LIB/phone_usage.py" "$@" ;;
       reorg)   shift; exec python3 "$LIB/phone_reorg.py" "$@" ;;

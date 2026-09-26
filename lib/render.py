@@ -279,6 +279,11 @@ h1 small { display: block; font-size: 13px; font-weight: 400; color: var(--dim);
 .chip.gone i { background: var(--gone); }
 .chip.unreviewed i { background: var(--dim); }
 .chip.shown i { background: var(--ink); }
+.devices { display: flex; gap: 4px; margin: 0 0 18px; }
+.devices[hidden] { display: none; }
+.devices button { appearance: none; cursor: pointer; border: 1px solid var(--line); background: transparent;
+  color: var(--dim); font: inherit; font-size: 13px; padding: 5px 14px; border-radius: 999px; }
+.devices button[aria-pressed="true"] { background: var(--ink); color: #141b2b; border-color: transparent; }
 .toggle { appearance: none; cursor: pointer; margin-left: auto; border: 1px solid var(--line);
   background: none; border-radius: 8px; padding: 5px 12px; }
 .toggle[aria-pressed="true"] { background: var(--ink); color: #141b2b; border-color: transparent; }
@@ -341,6 +346,16 @@ button.cell { appearance: none; border: 0; background: none; padding: 0; cursor:
   display: flex; align-items: center; justify-content: center; padding: 8px; text-align: center;
   color: var(--dim); font-size: 11.5px; margin: 0 4px 22px; }
 .page.dock { margin-top: 18px; width: fit-content; }
+/* A device page drawn to the device's own shape, grid and dock where they sit. */
+.page.device { width: fit-content; max-width: 100%; }
+.screen { position: relative; max-width: 100%; container-type: inline-size; border-radius: 14px;
+  background: linear-gradient(160deg, rgba(120,132,170,.22), rgba(60,70,100,.18)); border: 1px solid var(--line); }
+.screen .grid { position: absolute; gap: 0; --icon: var(--dev-icon); }
+.screen .dockbar .label, .screen .dockbar .why { display: none; }
+.screen .dockbar .iw { margin-bottom: 0; }
+.screen .cell { align-self: center; min-width: 0; }
+.screen .widget { margin: 6%; height: 88%; box-sizing: border-box; }
+.screen .dockbar { border-radius: 16px; background: rgba(255,255,255,.1); }
 .page.dock .grid { grid-template-rows: auto; }
 
 .gone-row { margin-top: 44px; padding-top: 22px; border-top: 1px dashed var(--line); }
@@ -385,8 +400,35 @@ dialog::backdrop { background: rgba(8,10,16,.6); backdrop-filter: blur(14px); }
 """
 
 JS = r"""
-const D = JSON.parse(document.getElementById('data').textContent);
+// Every device's data is on the page; one is shown at a time. The URL's
+// #id picks it, else the one last viewed, else the first.
+const DEVICES = [...document.querySelectorAll('script[data-device]')];
+const DEVICE = (() => {
+  let want = location.hash.slice(1);
+  if (!want) try { want = localStorage.getItem('launchpad-map-device') || ''; } catch (e) {}
+  return DEVICES.find(n => n.dataset.device === want) || DEVICES[0];
+})();
+try { localStorage.setItem('launchpad-map-device', DEVICE.dataset.device); } catch (e) {}
+const D = JSON.parse(DEVICE.textContent);
 const S = D.snapshots, ICON = D.icons, U = D.usage || null;
+if (DEVICES.length > 1) {
+  document.title = D.heading;
+  const nav = document.querySelector('.devices');
+  for (const n of DEVICES) {
+    const b = document.createElement('button');
+    b.type = 'button'; b.textContent = n.dataset.label;
+    b.setAttribute('aria-pressed', String(n === DEVICE));
+    b.addEventListener('click', () => { if (n !== DEVICE) { location.hash = n.dataset.device; location.reload(); } });
+    nav.append(b);
+  }
+  nav.hidden = false;
+}
+addEventListener('hashchange', () => { if (location.hash.slice(1) !== DEVICE.dataset.device) location.reload(); });
+{
+  const t = document.getElementById('usage-' + DEVICE.dataset.device);
+  if (t) document.getElementById('usage').append(t.content.cloneNode(true));
+  else document.getElementById('usage-btn').remove();
+}
 // Usage of an app as one line; null when there is no usage data at all.
 function usageLine(name) {
   if (!U) return null;
@@ -397,6 +439,9 @@ function usageLine(name) {
     + (u[4] ? '; last ' + u[4] : '');
 }
 const idle = name => !!(U && U[name] && U[name][5] && !U[name][1]);
+// Icon size on a device's mock screen; the screen is scaled to match, so
+// every device shows its icons at one size and its screen at its own shape.
+const ICON_PX = 40;
 // Apps per folder screen: Launchpad's page size, or the phone's folder grid.
 const fpage = s => s.grid ? s.grid.folder[0] * s.grid.folder[1] : D.pageSize;
 let PAGE = fpage(S[S.length - 1]);
@@ -788,18 +833,47 @@ function drawPages() {
     g.style.gridTemplateRows = 'repeat(' + G.rows + ', calc(var(--icon) + 56px))';
     return g;
   };
+  // An Android device's screen, when a snapshot recorded it (older ones did
+  // not; the shape is the device's, so any snapshot of it will do).
+  const geo = G && (G.screen ? G : (S.slice().reverse().find(x => x.grid && x.grid.screen) || {}).grid);
+  const pct = (v, of) => (100 * v / of) + '%';
+  const screen = (g, dockRow) => {
+    const [sw, sh] = geo.screen, box = geo.box;
+    const scr = el('div', 'screen');
+    scr.style.width = (sw * ICON_PX / geo.icon) + 'px';
+    scr.style.aspectRatio = sw + ' / ' + sh;
+    scr.style.setProperty('--dev-icon', (100 * geo.icon / sw) + 'cqw');
+    const at = (e, b) => {
+      e.style.left = pct(b[0], sw); e.style.top = pct(b[1], sh);
+      e.style.width = pct(b[2] - b[0], sw); e.style.height = pct(b[3] - b[1], sh);
+    };
+    at(g, box);
+    g.style.gridTemplateColumns = 'repeat(' + G.cols + ', 1fr)';
+    g.style.gridTemplateRows = 'repeat(' + G.rows + ', 1fr)';
+    scr.append(g);
+    if (dockRow && geo.dock) { at(dockRow, geo.dock); scr.append(dockRow); }
+    return scr;
+  };
+  const dockRow = () => {
+    if (!s.dock || !s.dock.length) return null;
+    const g = el('div', 'grid dockbar');
+    g.style.gridTemplateColumns = 'repeat(' + s.dock.length + ', 1fr)';
+    g.style.gridTemplateRows = '1fr';
+    s.dock.forEach(a => g.append(appCell(a)));
+    return g;
+  };
   s.pages.forEach((p, pi) => {
-    const sec = el('section', 'page');
+    const sec = el('section', geo ? 'page device' : 'page');
     const h = el('h2', null, 'Page ' + (pi + 1));
     const cap = G ? G.cols * G.rows : D.pageSize;
     const used = p.reduce((n, it) => n + (it.span ? it.span[0] * it.span[1] : 1), 0);
     h.append(el('span', used > cap ? 'over' : null, used + ' of ' + cap));
-    const g = shape(el('div', 'grid'));
+    const g = geo ? el('div', 'grid') : shape(el('div', 'grid'));
     p.forEach(it => g.append(place(
       it.kind === 'app' ? appCell(it.title) : it.kind === 'folder' ? folderCell(it) : el('div', 'widget', it.title), it)));
-    sec.append(h, g); m.append(sec);
+    sec.append(h, geo ? screen(g, dockRow()) : g); m.append(sec);
   });
-  if (s.dock && s.dock.length) {
+  if (!geo && s.dock && s.dock.length) {
     const sec = el('section', 'page dock'), g = el('div', 'grid');
     g.style.gridTemplateColumns = 'repeat(' + s.dock.length + ', var(--col))';
     s.dock.forEach(a => g.append(appCell(a)));
@@ -904,14 +978,49 @@ addEventListener('resize', () => { clearTimeout(_rz); _rz = setTimeout(holdHead,
 """
 
 
-def render(layouts, icons, ids, page_size, review=None, public=False, name="Launchpad", usage=None, charts="") -> str:
-    """Render the snapshots, oldest first, as one page with a history rail."""
+def device_data(docs, *, page_size=35, icon_px=96, db=None, icons_path=None, name="Launchpad",
+                review_path=None, showcase_path=None, usage_path=None, usage_mtime=None) -> dict:
+    """One device's part of the page: its snapshots (oldest first), icons,
+    approvals and usage, plus the usage charts' markup."""
+    public = bool(showcase_path)
+    review = load_review(showcase_path or review_path)
+    if public:
+        if review is None:
+            raise SystemExit(f"launchpad-map: no approvals at {showcase_path}")
+        docs = [showcase_only(docs[-1], review)]
+    layouts = [normalize(d, page_size) for d in docs]
+    titles = collect_titles(layouts)
+    if icons_path:
+        with open(icons_path) as fh:
+            icons = json.load(fh)
+        ids = {t: t for t in titles}
+    else:
+        ids = title_to_bundleid(db)
+        icons = fetch_icons({(ids[t], t) for t in titles if t in ids}, icon_px)
+    # Either the title has no bundle id recorded, or AppKit could not find the app.
+    missing = sorted(t for t in titles if ids.get(t) not in icons)
+
+    usage, charts = None, ""
+    if usage_path and not public:
+        import datetime
+        import usage_charts
+        with open(usage_path) as fh:
+            rows = json.load(fh)
+        usage = {t: [r["yearly"]["minutes"], r["yearly"]["launches"], r["monthly"]["minutes"],
+                     r["monthly"]["launches"], (r.get("last") or "")[:10], bool(r.get("package"))]
+                 for t, r in rows.items()}
+        # Folder membership for the charts: the newest real snapshot, not a draft.
+        newest = [d for d in docs if not d.get("draft")][-1]
+        read = datetime.date.fromtimestamp(usage_mtime or os.path.getmtime(usage_path))
+        charts = usage_charts.charts(rows, newest, read)
+
     layouts = [key_duplicates(layout) for layout in layouts]
     plain = lambda t: t.split(DUP)[0]
     by_title = {t: icons[ids[plain(t)]] for t in collect_titles(layouts) if ids.get(plain(t)) in icons}
     data = {
         "pageSize": page_size,
         "public": public,
+        "heading": name if public else f"{name} history" if len(layouts) > 1 else f"{name} layout",
         # Only the approved/hidden flags reach the page; reasons stay local.
         # The public page gets no approvals at all: they name the hidden apps.
         "review": None if review is None or public
@@ -924,21 +1033,32 @@ def render(layouts, icons, ids, page_size, review=None, public=False, name="Laun
             for layout in layouts
         ],
     }
-    blob = json.dumps(data, ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
-    heading = name if public else f"{name} history" if len(layouts) > 1 else f"{name} layout"
+    return {"data": data, "charts": charts, "missing": missing, "icons": len(by_title)}
+
+
+def page(devices) -> str:
+    """The page for one or more devices, each {"id", "label", "data", "charts"}.
+    It shows one device at a time, picked with the switcher (hidden when
+    there is only one) or by the URL's #id; the choice is remembered."""
+    esc = lambda t: t.replace("&", "&amp;").replace("<", "&lt;").replace('"', "&quot;")
+    blobs = "\n".join(
+        f'<script type="application/json" data-device="{d["id"]}" data-label="{esc(d["label"])}">'
+        + json.dumps(d["data"], ensure_ascii=False, separators=(",", ":")).replace("</", "<\\/")
+        + "</script>" for d in devices)
+    charts = "\n".join(f'<template id="usage-{d["id"]}">{d["charts"]}</template>' for d in devices if d["charts"])
     chart_css = ""
     if charts:
         import usage_charts
         chart_css = usage_charts.CHART_CSS
-    usage_btn = '<button class="toggle" type="button" id="usage-btn" aria-pressed="false">Usage</button>' if charts else ""
-    usage_sec = f'<section id="usage" class="usage" hidden>{charts}</section>' if charts else ""
+    title = devices[0]["data"]["heading"] if len(devices) == 1 else "Home screens"
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{heading}</title>
+<title>{esc(title)}</title>
 <style>{CSS}{chart_css}</style></head><body>
 <main>
   <header id="head">
+  <nav class="devices" aria-label="Device" hidden></nav>
   <div class="top">
     <h1></h1>
     <div class="find">
@@ -961,21 +1081,47 @@ def render(layouts, icons, ids, page_size, review=None, public=False, name="Laun
     <button class="chip shown" type="button" data-k="ok"><i></i><span></span></button>
     <button class="chip gone" type="button" data-k="no"><i></i><span></span></button>
     <button class="chip unreviewed" type="button" data-k="unrev"><i></i><span></span></button>
-    {usage_btn}
+    <button class="toggle" type="button" id="usage-btn" aria-pressed="false">Usage</button>
     <button class="toggle" type="button" id="sc" aria-pressed="false">Showcase</button>
     <button class="chip unreviewed" type="button" data-k="unreviewed" title="Not in the showcase approvals yet, so hidden from the showcase"><i></i><span></span></button>
   </div>
   </header>
   <div id="pages"></div>
   <div id="gone"></div>
-  {usage_sec}
+  <section id="usage" class="usage" hidden></section>
 </main>
 <nav class="rail" aria-label="Snapshots, newest first"><ol></ol></nav>
 <dialog id="folder" aria-label="Folder contents"><div class="sheet"></div></dialog>
-<script type="application/json" id="data">{blob}</script>
+{blobs}
+{charts}
 <script>{JS}</script>
 </body></html>
 """
+
+
+def read_docs(paths, db=None) -> list:
+    """The layouts at `paths`, or the live Launchpad database when there are none."""
+    if paths:
+        docs = []
+        for path in paths:
+            with open(path) as fh:
+                docs.append(json.load(fh))
+        return docs
+    import shutil
+    conn, tmp = dump.open_snapshot(db or dump.db_path())
+    try:
+        return [{"title": "Current", "pages": dump.read_layout(conn)}]
+    finally:
+        conn.close()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def report(out, parts):
+    size_mb = os.path.getsize(out) / 1024 / 1024
+    print(f"wrote {out} ({size_mb:.1f} MB, {sum(p['icons'] for p in parts)} icons)", file=sys.stderr)
+    missing = sorted({t for p in parts for t in p["missing"]})
+    if missing:
+        print("no icon for: " + ", ".join(missing[:12]) + (" …" if len(missing) > 12 else ""), file=sys.stderr)
 
 
 def main() -> int:
@@ -1007,65 +1153,12 @@ def main() -> int:
                     "in each app's menu, with a chip for apps not launched this year")
     args = ap.parse_args()
 
-    docs = []
-    if args.layout:
-        for path in args.layout:
-            with open(path) as fh:
-                docs.append(json.load(fh))
-    else:
-        conn, tmp = dump.open_snapshot(args.db or dump.db_path())
-        try:
-            docs.append(
-                {"title": "Current", "pages": dump.read_layout(conn)}
-            )
-        finally:
-            conn.close()
-            import shutil
-
-            shutil.rmtree(tmp, ignore_errors=True)
-
-    public = bool(args.showcase)
-    review = load_review(args.showcase or args.review)
-    if public:
-        if review is None:
-            raise SystemExit(f"launchpad-map: no approvals at {args.showcase}")
-        docs = [showcase_only(docs[-1], review)]
-    layouts = [normalize(d, args.page_size) for d in docs]
-    titles = collect_titles(layouts)
-    if args.icons:
-        with open(args.icons) as fh:
-            icons = json.load(fh)
-        ids = {t: t for t in titles}
-    else:
-        ids = title_to_bundleid(args.db)
-        icons = fetch_icons({(ids[t], t) for t in titles if t in ids}, args.icon_px)
-    # Either the title has no bundle id recorded, or AppKit could not find the app.
-    missing = sorted(t for t in titles if ids.get(t) not in icons)
-
-    usage, charts = None, ""
-    if args.usage and not public:
-        import datetime
-        import usage_charts
-        with open(args.usage) as fh:
-            rows = json.load(fh)
-        usage = {t: [r["yearly"]["minutes"], r["yearly"]["launches"], r["monthly"]["minutes"],
-                     r["monthly"]["launches"], (r.get("last") or "")[:10], bool(r.get("package"))]
-                 for t, r in rows.items()}
-        # Folder membership for the charts: the newest real snapshot, not a draft.
-        newest = [d for d in docs if not d.get("draft")][-1]
-        read = datetime.date.fromtimestamp(os.path.getmtime(args.usage))
-        charts = usage_charts.charts(rows, newest, read)
+    part = device_data(read_docs(args.layout, args.db), page_size=args.page_size, icon_px=args.icon_px,
+                       db=args.db, icons_path=args.icons, name=args.name, review_path=args.review,
+                       showcase_path=args.showcase, usage_path=args.usage)
     with open(args.out, "w") as fh:
-        fh.write(render(layouts, icons, ids, args.page_size, review, public, args.name, usage, charts))
-
-    size_mb = os.path.getsize(args.out) / 1024 / 1024
-    print(f"wrote {args.out} ({size_mb:.1f} MB, {len(icons)} icons)", file=sys.stderr)
-    if missing:
-        print(
-            "no icon for: " + ", ".join(missing[:12])
-            + (" …" if len(missing) > 12 else ""),
-            file=sys.stderr,
-        )
+        fh.write(page([{"id": "layout", "label": args.name, **part}]))
+    report(args.out, [part])
     return 0
 
 
