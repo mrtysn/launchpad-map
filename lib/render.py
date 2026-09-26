@@ -353,6 +353,14 @@ button.cell { appearance: none; border: 0; background: none; padding: 0; cursor:
 .screen .grid { position: absolute; gap: 0; --icon: var(--dev-icon); }
 .screen .dockbar .label, .screen .dockbar .why { display: none; }
 .screen .dockbar .iw { margin-bottom: 0; }
+/* A device's cell is only as tall as the icon and its name: the folder's
+   app count rides on the icon, and the text under it is set tighter. */
+.screen .iw { margin-bottom: 3px; }
+.screen .label { font-size: 10.5px; line-height: 1.2; }
+.screen .why { font-size: 9.5px; line-height: 1.15; margin-top: 0; }
+.screen .count { position: absolute; top: calc(var(--icon) - 9px); left: calc(50% + var(--icon) / 2);
+  transform: translateX(-75%); margin: 0; padding: 0 4px; border-radius: 7px; font-size: 9px; line-height: 14px;
+  background: #141b2bdd; color: var(--dim); max-width: none; }
 .screen .cell { align-self: center; min-width: 0; }
 .screen .widget { margin: 6%; height: 88%; box-sizing: border-box; }
 .screen .dockbar { border-radius: 16px; background: rgba(255,255,255,.1); }
