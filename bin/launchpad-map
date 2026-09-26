@@ -13,6 +13,7 @@ USAGE
   launchpad-map dump   [--out FILE] [--title TEXT] [--date YYYY-MM-DD] [--db PATH] [--save]
   launchpad-map history [--out FILE] [--open] [--device mac|phone|tablet]
   launchpad-map showcase [--out FILE] [--open]
+  launchpad-map review (--show | --hide REASON) APP...
   launchpad-map render --out FILE [--layout FILE]... [--page-size N] [--icon-px N]
   launchpad-map open   [--layout FILE]...
   launchpad-map write  LAYOUT [--dry-run] [--no-restart] [--backup-dir DIR]
@@ -54,6 +55,9 @@ COMMANDS
            approves, to showcase.html in the repo. Apps it does not list are
            hidden until reviewed; the history view counts them.
 
+  review   Approve apps for the showcase, or hide them with a reason, in
+           showcase.json (kept sorted).
+
   write    Apply a layout to the live Launchpad database. Backs the database
            up first, applies everything in one transaction, then restarts the
            Dock. Adds a snapshot to the history. Use
@@ -94,6 +98,7 @@ case "${1-}" in
   write)  shift; exec python3 "$LIB/write.py" "$@" ;;
   history) shift; exec python3 "$LIB/history.py" "$@" ;;
   inventory) shift; exec python3 "$LIB/inventory.py" "$@" ;;
+  review) shift; exec python3 "$LIB/review.py" "$@" ;;
   showcase) exec python3 "$LIB/history.py" "$@" ;;
   phone|tablet)
     export LAUNCHPAD_MAP_DEVICE="$1"
