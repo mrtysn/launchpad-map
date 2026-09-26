@@ -27,6 +27,7 @@ USAGE
                            move-folder FOLDER --to PAGE | reorder FOLDER APP... | lock on|off |
                            pause | resume | stop
   launchpad-map phone watch [--port N] [--open]
+  launchpad-map tablet dump|history|write|usage|reorg|op|watch ...
   launchpad-map --help
 
 COMMANDS
@@ -63,6 +64,10 @@ COMMANDS
            phone-history.html. The only input sent to the phone is HOME,
            BACK, page swipes and taps on folder icons.
 
+  tablet   The same commands for the Android tablet, kept apart in
+           layouts/tablet/ and tablet-history.html. With the phone and the
+           tablet both attached, each command picks its own device.
+
   inventory
            Cross-reference a saved app inventory (Mac App Store / Homebrew
            casks / /Applications, as dumped during a machine offboarding)
@@ -88,7 +93,8 @@ case "${1-}" in
   history) shift; exec python3 "$LIB/history.py" "$@" ;;
   inventory) shift; exec python3 "$LIB/inventory.py" "$@" ;;
   showcase) exec python3 "$LIB/history.py" "$@" ;;
-  phone)
+  phone|tablet)
+    export LAUNCHPAD_MAP_DEVICE="$1"
     shift
     case "${1-}" in
       dump)    shift; exec python3 "$LIB/phone.py" "$@" ;;
@@ -98,7 +104,7 @@ case "${1-}" in
       reorg)   shift; exec python3 "$LIB/phone_reorg.py" "$@" ;;
       op)      shift; exec python3 "$LIB/phone_op.py" "$@" ;;
       watch)   shift; exec python3 "$LIB/phone_watch.py" "$@" ;;
-      *) print -u2 "launchpad-map: phone takes dump, history, write, usage, reorg, op or watch"; exit 64 ;;
+      *) print -u2 "launchpad-map: $LAUNCHPAD_MAP_DEVICE takes dump, history, write, usage, reorg, op or watch"; exit 64 ;;
     esac
     ;;
   open)

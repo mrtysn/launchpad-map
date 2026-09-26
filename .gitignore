@@ -8,6 +8,7 @@ __pycache__/
 layouts/*.json
 !layouts/example.json
 layouts/phone/
+layouts/tablet/
 
 # Showcase approvals list this machine's apps too; showcase.example.json is the sample.
 showcase.json

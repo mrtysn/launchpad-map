@@ -37,7 +37,12 @@ import time
 import xml.etree.ElementTree as ET
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-LAYOUTS = os.path.join(REPO, "layouts", "phone")
+# Which Android device this run is about: `launchpad-map tablet ...` sets it.
+# Each kind keeps its own snapshots, icons and write log.
+KIND = os.environ.get("LAUNCHPAD_MAP_DEVICE", "phone")
+if KIND not in ("phone", "tablet"):
+    raise SystemExit(f"launchpad-map: LAUNCHPAD_MAP_DEVICE must be phone or tablet, not {KIND!r}")
+LAYOUTS = os.path.join(REPO, "layouts", KIND)
 ICONS = os.path.join(LAYOUTS, "icons.json")
 # Pages read so far, so a failed walk resumes instead of starting over.
 PROGRESS = os.path.join(LAYOUTS, ".progress")
@@ -55,7 +60,7 @@ PAGE_OF = re.compile(r"^Page (\d+) of (\d+)")
 
 
 def die(msg: str):
-    raise SystemExit(f"launchpad-map phone: {msg}")
+    raise SystemExit(f"launchpad-map {KIND}: {msg}")
 
 
 class Dropped(Exception):
@@ -493,9 +498,37 @@ def reconnect(hw: str) -> str:
     return got[-1] if out.returncode == 0 and got else ""
 
 
+def is_tablet(serial) -> bool:
+    try:
+        out = subprocess.run(["adb", "-s", serial, "shell", "getprop", "ro.build.characteristics"],
+                             capture_output=True, text=True, timeout=10).stdout
+    except subprocess.TimeoutExpired:
+        return False
+    return "tablet" in out.strip().split(",")
+
+
+def of_kind(serials):
+    """The connected devices of this run's KIND, one serial per device: adb
+    can list the same phone twice, by ip:port and by its mDNS name."""
+    seen, out = set(), []
+    for s in serials:
+        if is_tablet(s) != (KIND == "tablet"):
+            continue
+        try:
+            hw = subprocess.run(["adb", "-s", s, "shell", "getprop", "ro.serialno"],
+                                capture_output=True, text=True, timeout=10).stdout.strip()
+        except subprocess.TimeoutExpired:
+            continue
+        if hw and hw not in seen:
+            seen.add(hw)
+            out.append(s)
+    return out
+
+
 def pick_serial(wanted):
     """The adb serial to drive: `wanted` when adb has it, else the same
-    phone wherever it is now; with nothing wanted, the one connected device."""
+    device wherever it is now; with nothing wanted, the one connected
+    device of this run's KIND."""
     if wanted:
         if wanted in connected():
             return wanted
@@ -505,17 +538,19 @@ def pick_serial(wanted):
             return got
         die(f"{wanted} is not connected and could not be reached")
     ready = connected()
+    if len(ready) > 1:
+        ready = of_kind(ready)
     if len(ready) != 1:
-        die(f"expected exactly one connected device, found {len(ready)}; pass --serial")
+        die(f"expected exactly one connected {KIND}, found {len(ready)}; pass --serial")
     return ready[0]
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(prog="launchpad-map phone dump", description=__doc__,
+    ap = argparse.ArgumentParser(prog=f"launchpad-map {KIND} dump", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--serial", "-s", default=os.environ.get("ANDROID_SERIAL"),
                     help="adb serial (default: $ANDROID_SERIAL, else the one connected device)")
-    ap.add_argument("--save", action="store_true", help="add the snapshot to layouts/phone/")
+    ap.add_argument("--save", action="store_true", help=f"add the snapshot to layouts/{KIND}/")
     ap.add_argument("--out", help="write the snapshot JSON here instead of stdout")
     ap.add_argument("--note", help="note to store with the snapshot")
     ap.add_argument("--pages-only", action="store_true",
@@ -637,7 +672,7 @@ def known_folders() -> dict:
     'logic' and the other way round), so a rename by hand still matches."""
     names = sorted(n for n in os.listdir(LAYOUTS) if re.match(r"\d{4}-\d{2}-\d{2}-\d{4}\.json$", n))
     if not names:
-        die("--pages-only needs an earlier snapshot in layouts/phone/ to take the folders from")
+        die(f"--pages-only needs an earlier snapshot in layouts/{KIND}/ to take the folders from")
     with open(os.path.join(LAYOUTS, names[-1])) as fh:
         doc = json.load(fh)
     out = {}

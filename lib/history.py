@@ -33,8 +33,10 @@ LAYOUTS = os.path.join(REPO, "layouts")
 PAGE = os.path.join(REPO, "launchpad-history.html")
 REVIEW = os.path.join(REPO, "showcase.json")
 SHOWCASE = os.path.join(REPO, "showcase.html")
-PHONE = os.path.join(LAYOUTS, "phone")
-PHONE_PAGE = os.path.join(REPO, "phone-history.html")
+# An Android device's snapshots; `launchpad-map tablet history` picks the tablet's.
+KIND = os.environ.get("LAUNCHPAD_MAP_DEVICE", "phone")
+PHONE = os.path.join(LAYOUTS, KIND)
+PHONE_PAGE = os.path.join(REPO, f"{KIND}-history.html")
 
 
 def live_pages(db=None) -> list:
@@ -100,8 +102,8 @@ def main() -> int:
     ap.add_argument("--out", "-o", default=SHOWCASE if showcase else PAGE,
                     help="HTML file to write (default: in the repo)")
     ap.add_argument("--open", action="store_true", help="open the page when done")
-    ap.add_argument("--phone", action="store_true", help="the phone's snapshots in layouts/phone/, "
-                    "to phone-history.html")
+    ap.add_argument("--phone", action="store_true", help=f"the {KIND}'s snapshots in layouts/{KIND}/, "
+                    f"to {KIND}-history.html")
     args = ap.parse_args(sys.argv[2:] if showcase else sys.argv[1:])
     if args.phone and showcase:
         raise SystemExit("launchpad-map: the showcase covers Launchpad only")
@@ -112,7 +114,7 @@ def main() -> int:
     snaps = [p for p in layouts if not json.load(open(p)).get("draft")]
     if not snaps:
         raise SystemExit("launchpad-map: no snapshots yet; run `launchpad-map "
-                         + ("phone dump" if args.phone else "dump") + " --save`")
+                         + (f"{KIND} dump" if args.phone else "dump") + " --save`")
     cmd = [sys.executable, os.path.join(os.path.dirname(__file__), "render.py"),
            "--out", args.out]
     if args.phone:
