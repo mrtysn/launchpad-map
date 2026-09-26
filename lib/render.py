@@ -962,7 +962,7 @@ document.addEventListener('keydown', e => {
   if (e.key === 'ArrowDown' && cur > 0) { e.preventDefault(); select(cur - 1); }
   if (e.key === '/') { e.preventDefault(); $('#q').focus(); }
 });
-if (S.length < 2) { document.querySelector('.rail').remove(); document.body.style.gridTemplateColumns = '1fr'; }
+if (S.length < 2 && !D.history) { document.querySelector('.rail').remove(); document.body.style.gridTemplateColumns = '1fr'; }
 if (D.public || !D.review && S.length < 2) $('.compare').hidden = true;
 // The header grows with the note and the folder summary. Reserve the tallest
 // one any snapshot needs, so the pages stay put while stepping through them.
@@ -987,7 +987,7 @@ addEventListener('resize', () => { clearTimeout(_rz); _rz = setTimeout(holdHead,
 
 
 def device_data(docs, *, page_size=35, icon_px=96, db=None, icons_path=None, name="Launchpad",
-                review_path=None, showcase_path=None, usage_path=None, usage_mtime=None) -> dict:
+                review_path=None, showcase_path=None, usage_path=None, usage_mtime=None, history=False) -> dict:
     """One device's part of the page: its snapshots (oldest first), icons,
     approvals and usage, plus the usage charts' markup."""
     public = bool(showcase_path)
@@ -1028,6 +1028,8 @@ def device_data(docs, *, page_size=35, icon_px=96, db=None, icons_path=None, nam
     data = {
         "pageSize": page_size,
         "public": public,
+        # A history keeps its timeline even with one snapshot; a one-off render drops it.
+        "history": history and not public,
         "heading": name if public else f"{name} history" if len(layouts) > 1 else f"{name} layout",
         # Only the approved/hidden flags reach the page; reasons stay local.
         # The public page gets no approvals at all: they name the hidden apps.

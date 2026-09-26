@@ -102,11 +102,11 @@ def device_part(dev, label, directory):
     if not any(not d.get("draft") for d in docs):
         return None
     if dev == "mac":
-        part = render.device_data(docs, review_path=REVIEW if os.path.exists(REVIEW) else None)
+        part = render.device_data(docs, review_path=REVIEW if os.path.exists(REVIEW) else None, history=True)
     else:
         usage = os.path.join(directory, "usage.json")  # from `phone usage --save`
         part = render.device_data(docs, icons_path=os.path.join(directory, "icons.json"), name="Home screen",
-                                  usage_path=usage if os.path.exists(usage) else None)
+                                  usage_path=usage if os.path.exists(usage) else None, history=True)
     return {"id": dev, "label": label, **part}
 
 
