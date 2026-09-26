@@ -638,6 +638,32 @@ function storeMenu(anchor, name) {
   (document.querySelector('dialog[open]') || document.body).append(m);
   menuEl = m;
 }
+// Inside the Home Screens app the page can ask it to act: record a showcase
+// decision. In a browser there is no app, and none of this appears.
+const APP = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.homeScreens;
+function reviewMenu(anchor, name) {
+  const same = menuEl && menuEl.anchor === anchor;
+  closeMenu();
+  if (same) return;
+  const m = el('div', 'storemenu');
+  const r = D.review[name];
+  m.append(el('span', 'use', !r ? 'Not reviewed' : r[0] ? 'Shown in the showcase' : 'Hidden: ' + (r[1] || 'no reason')));
+  const item = (text, show) => {
+    const a = el('a', null, text); a.href = '#';
+    a.addEventListener('click', e => { e.preventDefault(); closeMenu(); APP.postMessage({ review: name, show }); });
+    m.append(a);
+  };
+  if (!r || !r[0]) item('Show in showcase', true);
+  if (!r || r[0]) item('Hide from showcase…', false);
+  m.anchor = anchor;
+  const b = anchor.getBoundingClientRect();
+  m.style.left = (b.left + b.width / 2) + 'px';
+  m.style.top = (b.bottom + 4) + 'px';
+  (document.querySelector('dialog[open]') || document.body).append(m);
+  menuEl = m;
+}
+// The app calls this once a decision is saved, so the page updates in place.
+window.hsReviewed = (name, show, reason) => { D.review[name] = [show, reason || '']; draw(); };
 document.addEventListener('click', closeMenu);
 document.addEventListener('scroll', closeMenu, true);
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
@@ -652,6 +678,9 @@ function appCell(t, withStatus = true) {
   if (S[cur].grid) {
     c.classList.add('linkable');
     w.addEventListener('click', e => { e.stopPropagation(); storeMenu(w, plain(t)); });
+  } else if (APP && D.review && !D.public) {
+    c.classList.add('linkable');
+    w.addEventListener('click', e => { e.stopPropagation(); reviewMenu(w, plain(t)); });
   }
   if (st) { const y = el('div', 'why', caption(st)); y.title = y.textContent; c.append(y); }
   if (narrowing() && withStatus) c.classList.add(matches(t) ? 'hit' : 'dim');

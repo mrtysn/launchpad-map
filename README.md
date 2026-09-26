@@ -41,8 +41,18 @@ commands that feed it one click away.
 - **Scan** runs that device's `dump --save` and re-renders the page. For the
   phone and tablet it is enabled only while the device is attached, awake and
   unlocked (`launchpad-map phone status`), since a scan drives the screen.
-- **Apply Proposal…** lists the device's drafts and, after a confirmation, runs
-  `write` on the one picked.
+- **Apply Proposal…** lists the device's drafts, runs the picked one's
+  `write --dry-run`, and applies it only after you confirm from that plan. A
+  write on the phone or tablet can be paused, resumed and stopped between
+  operations from the bar at the bottom.
+- **More** holds the rest: for the phone and tablet, **Refresh Usage Stats**
+  (`usage --save`), **New Proposal from Reorg Plan…** (`reorg`, saved as the
+  next `proposal-N.json`) and **Home Screen Controls** (`op`: peek, go to a
+  page, home, back, layout lock, or any operation typed in); for the Mac,
+  **Preview Showcase** and **Rebuild Showcase**.
+- On the Mac, clicking an app gives **Show in showcase** / **Hide from
+  showcase…** (`review`; hiding asks for the reason). The page updates at once
+  and the saved pages are rebuilt a few seconds after the last decision.
 - Progress shows in the bar at the bottom; **Log** shows every line.
 
 The app runs the commands of the checkout it was built from, so rebuild it with
