@@ -322,7 +322,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         config.userContentController.addUserScript(
             WKUserScript(source: PageTheme.script(for: NSApp.effectiveAppearance), injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: .zero, configuration: config)
-        window = StyledWindow.make(title: "Home Screens", size: NSSize(width: 1400, height: 900),
+        window = StyledWindow.make(title: "Home Screens", launch: .maximized,
                                    minSize: NSSize(width: 900, height: 560), autosave: "HomeScreensWindow")
         super.init()
         config.userContentController.add(self, name: "homeScreens")
