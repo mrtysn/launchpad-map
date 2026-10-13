@@ -14,9 +14,10 @@ import WebKit
 
 // MARK: - Where things are
 
-/// The launchpad-map checkout: recorded in Info.plist by bundle.sh; a build run straight from the
-/// checkout (swift build) is found by walking up from the executable to the folder with bin/launchpad-map.
-let repo: URL = {
+/// The launchpad-map checkout: recorded in Info.plist by `project-lifecycle install` (the manifest's
+/// "{repo}"); a build run straight from the checkout is found by walking up from the executable to
+/// the folder with bin/launchpad-map.
+let checkout: URL = {
     if let path = Bundle.main.object(forInfoDictionaryKey: "LaunchpadMapRepo") as? String, !path.isEmpty {
         return URL(fileURLWithPath: path)
     }
@@ -25,15 +26,18 @@ let repo: URL = {
         if FileManager.default.fileExists(atPath: dir.appendingPathComponent("bin/launchpad-map").path) { return dir }
         dir = dir.deletingLastPathComponent()
     }
-    fatalError("Info.plist has no LaunchpadMapRepo; build the app with app/bundle.sh")
+    fatalError("Info.plist has no LaunchpadMapRepo; build the app with project-lifecycle install")
 }()
-let tool = repo.appendingPathComponent("bin/launchpad-map")
-let historyPage = repo.appendingPathComponent("history.html")
-let showcasePage = repo.appendingPathComponent("showcase.html")
+/// The self-test points everything below at a throwaway checkout holding a stub `launchpad-map`.
+nonisolated(unsafe) var repoOverride: URL?
+var repo: URL { repoOverride ?? checkout }
+var tool: URL { repo.appendingPathComponent("bin/launchpad-map") }
+var historyPage: URL { repo.appendingPathComponent("history.html") }
+var showcasePage: URL { repo.appendingPathComponent("showcase.html") }
 
 /// The login shell's PATH. An app opened from the Dock gets a bare one, and the
 /// scanner needs python3, adb, adb-reconnect and swift from the user's setup.
-let shellPath: String = {
+let loginShellPath: String = {
     let p = Process()
     p.executableURL = URL(fileURLWithPath: "/bin/zsh")
     p.arguments = ["-lic", "print -r -- \"PATH=$PATH\""]
@@ -50,9 +54,12 @@ let shellPath: String = {
     return line.map { String($0.dropFirst(5)) } ?? "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }()
 
+/// A fixed PATH for the self-test, which must not start the login shell.
+nonisolated(unsafe) var pathOverride: String?
+
 func environment() -> [String: String] {
     var env = ProcessInfo.processInfo.environment
-    env["PATH"] = shellPath
+    env["PATH"] = pathOverride ?? loginShellPath
     env["PYTHONUNBUFFERED"] = "1"  // progress lines as they happen, not at exit
     return env
 }
@@ -60,7 +67,7 @@ func environment() -> [String: String] {
 // MARK: - Devices
 
 /// Where each device's snapshots and proposals are read from: the checkout's layouts/. A snapshot run
-/// points it at the fixtures.
+/// points it at the fixtures, the self-test at its throwaway checkout.
 nonisolated(unsafe) var dataRoot: URL = repo.appendingPathComponent("layouts")
 
 struct Device {
@@ -308,11 +315,16 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     var appearanceWatch: NSKeyValueObservation?
     /// A snapshot run reads nothing from the devices and loads the page it is given.
     let offline: Bool
+    /// What the window asks the person, as code the self-test can answer: fields for a form, a yes
+    /// for a plan, a plan file to build a proposal from. Unset, the real dialogs open.
+    var answerForm: ((String, String, [String], [String]) -> [String]?)?
+    var answerPlan: ((Proposal, Device, [String]) -> Bool)?
+    var answerFile: ((Device) -> URL?)?
 
     var device: Device { devices[max(0, picker.selectedSegment)] }
     var ready: Bool { !device.android || statuses[device.id]?.ready == true }
 
-    init(offline: Bool = false, page: URL? = nil) {
+    init(offline: Bool = false, page: URL? = nil, autosave: String = "HomeScreensWindow") {
         self.offline = offline
         let config = WKWebViewConfiguration()
         // The window's own picker chooses the device; hide the page's. The page takes its colours from the style.
@@ -323,7 +335,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
             WKUserScript(source: PageTheme.script(for: NSApp.effectiveAppearance), injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: .zero, configuration: config)
         window = StyledWindow.make(title: "Home Screens", launch: .maximized,
-                                   minSize: NSSize(width: 900, height: 560), autosave: "HomeScreensWindow")
+                                   minSize: NSSize(width: 900, height: 560), autosave: autosave)
         super.init()
         config.userContentController.add(self, name: "homeScreens")
         window.delegate = self
@@ -376,6 +388,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         stack.setHuggingPriority(.defaultLow, for: .vertical)
         for v in [web, logLine, logScroll] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         layout = StyledLayout(window: window, band: band, content: stack, footer: footer)
+        footer.resting = "Ready"
         footer.show("Ready", announce: false)
         appearanceWatch = web.observe(\.effectiveAppearance, options: [.new]) { [weak self] web, _ in
             let appearance = web.effectiveAppearance
@@ -431,7 +444,8 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         showingShowcase = false
         var parts = URLComponents(url: historyPage, resolvingAgainstBaseURL: false)!
         parts.fragment = device.id
-        web.loadFileURL(parts.url!, allowingReadAccessTo: repo)
+        web.loadFileURL(parts.url!, allowingReadAccessTo: historyPage.deletingLastPathComponent())
+        refreshControls()
     }
 
     /// Re-render the history page, then show it.
@@ -463,8 +477,13 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     // MARK: apply, with its dry run first
 
     @objc func apply() {
+        applyMenu()?.popUp(positioning: nil, at: NSPoint(x: 0, y: applyButton.bounds.height + 4), in: applyButton)
+    }
+
+    /// The device's drafts, one item each; nil when it has none.
+    func applyMenu() -> NSMenu? {
         let drafts = proposals(for: device)
-        guard !drafts.isEmpty else { return }
+        guard !drafts.isEmpty else { return nil }
         let menu = NSMenu()
         for p in drafts {
             let item = NSMenuItem(title: p.title + " — " + p.url.lastPathComponent, action: #selector(dryRun(_:)), keyEquivalent: "")
@@ -473,7 +492,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
             item.toolTip = p.note.isEmpty ? nil : p.note
             menu.addItem(item)
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: applyButton.bounds.height + 4), in: applyButton)
+        return menu
     }
 
     @objc func dryRun(_ item: NSMenuItem) {
@@ -487,6 +506,10 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     }
 
     func confirmApply(_ p: Proposal, on d: Device, plan: [String]) {
+        if let answerPlan {
+            if answerPlan(p, d, plan) { startApply(p, on: d) }
+            return
+        }
         let alert = NSAlert()
         alert.messageText = "Apply “\(p.title)” to the \(d.name)?"
         var text = d.android
@@ -508,15 +531,23 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         alert.addButton(withTitle: "Cancel")
         alert.beginSheetModal(for: window) { [weak self] response in
             guard response == .alertFirstButtonReturn, let self else { return }
-            self.runner.enqueue(Job(d.cmd("write", p.url.path), "Applying \(p.title) to the \(d.name)") { [weak self] _, _ in
-                self?.render()
-            })
+            self.startApply(p, on: d)
         }
+    }
+
+    func startApply(_ p: Proposal, on d: Device) {
+        runner.enqueue(Job(d.cmd("write", p.url.path), "Applying \(p.title) to the \(d.name)") { [weak self] _, _ in
+            self?.render()
+        })
     }
 
     // MARK: the More menu
 
     @objc func more() {
+        moreMenu().popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.height + 4), in: moreButton)
+    }
+
+    func moreMenu() -> NSMenu {
         let d = device, menu = NSMenu()
         menu.autoenablesItems = false
         func add(_ title: String, _ action: Selector, enabled: Bool = true, tag: Int = 0, to m: NSMenu? = nil) {
@@ -549,7 +580,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
             add(showingShowcase ? "Back to History" : "Preview Showcase", #selector(previewShowcase))
             add("Rebuild Showcase", #selector(rebuildShowcase))
         }
-        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: moreButton.bounds.height + 4), in: moreButton)
+        return menu
     }
 
     @objc func refreshUsage() {
@@ -561,25 +592,31 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
 
     @objc func newProposal() {
         let d = device
+        if let answerFile {
+            if let plan = answerFile(d) { buildProposal(from: plan, on: d) }
+            return
+        }
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.json]
         panel.directoryURL = d.dir
         panel.message = "A reorg plan: the new folders to make and what goes in them"
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK, let plan = panel.url, let self else { return }
-            DispatchQueue.main.async {
-                guard let fields = self.ask("New proposal from \(plan.lastPathComponent)",
-                                            "It is placed on the \(d.name)'s newest snapshot and saved as a draft.",
-                                            ["Title", "Note"], ["", ""]) else { return }
-                let out = nextProposalFile(in: d.dir)
-                var args = d.cmd("reorg", plan.path)
-                if !fields[0].isEmpty { args += ["--title", fields[0]] }
-                if !fields[1].isEmpty { args += ["--note", fields[1]] }
-                self.runner.enqueue(Job(args, "Building \(out.lastPathComponent)", stdout: out) { [weak self] ok, _ in
-                    if ok { self?.render() } else { try? FileManager.default.removeItem(at: out) }
-                })
-            }
+            DispatchQueue.main.async { self.buildProposal(from: plan, on: d) }
         }
+    }
+
+    func buildProposal(from plan: URL, on d: Device) {
+        guard let fields = ask("New proposal from \(plan.lastPathComponent)",
+                               "It is placed on the \(d.name)'s newest snapshot and saved as a draft.",
+                               ["Title", "Note"], ["", ""]) else { return }
+        let out = nextProposalFile(in: d.dir)
+        var args = d.cmd("reorg", plan.path)
+        if !fields[0].isEmpty { args += ["--title", fields[0]] }
+        if !fields[1].isEmpty { args += ["--note", fields[1]] }
+        runner.enqueue(Job(args, "Building \(out.lastPathComponent)", stdout: out) { [weak self] ok, _ in
+            if ok { self?.render() } else { try? FileManager.default.removeItem(at: out) }
+        })
     }
 
     @objc func op(_ item: NSMenuItem) {
@@ -612,7 +649,8 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         if showingShowcase { load(); return }
         let show = { [weak self] in
             self?.showingShowcase = true
-            self?.web.loadFileURL(showcasePage, allowingReadAccessTo: repo)
+            self?.web.loadFileURL(showcasePage, allowingReadAccessTo: showcasePage.deletingLastPathComponent())
+            self?.refreshControls()
         }
         if FileManager.default.fileExists(atPath: showcasePage.path) {
             show()
@@ -632,6 +670,11 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard let body = message.body as? [String: Any], let app = body["review"] as? String,
               let show = body["show"] as? Bool else { return }
+        review(app, show: show)
+    }
+
+    /// Record a showcase decision made from the page: show the app, or hide it with a reason.
+    func review(_ app: String, show: Bool) {
         var reason = ""
         if !show {
             guard let f = ask("Hide “\(app)” from the showcase?",
@@ -691,6 +734,7 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
 
     /// A small form: one text field per label. nil when cancelled.
     func ask(_ title: String, _ info: String, _ labels: [String], _ values: [String]) -> [String]? {
+        if let answerForm { return answerForm(title, info, labels, values) }
         let alert = NSAlert()
         alert.messageText = title
         alert.informativeText = info

@@ -11,6 +11,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             Task { @MainActor in exit(await runSnapshot(to: snapshotPath)) }
             return
         }
+        if selfTest {
+            Task { @MainActor in exit(await runSelfTest()) }
+            return
+        }
         let main = NSMenu()
         let appItem = NSMenuItem()
         let appMenu = NSMenu()
@@ -42,8 +46,12 @@ let snapshotPath: String? = {
     return ProcessInfo.processInfo.environment["HOME_SCREENS_SNAPSHOT"]
 }()
 
+/// HOME_SCREENS_SELFTEST=1 builds the window over a throwaway checkout with a stub `launchpad-map`, presses every
+/// control and exits 0 when each did what it says (app/SelfTest.swift). It runs no real command and takes no focus.
+let selfTest = ProcessInfo.processInfo.environment["HOME_SCREENS_SELFTEST"] == "1"
+
 let app = NSApplication.shared
 let delegate = MainActor.assumeIsolated { AppDelegate() }
 app.delegate = delegate
-app.setActivationPolicy(snapshotPath == nil ? .regular : .prohibited)
+app.setActivationPolicy(snapshotPath == nil && !selfTest ? .regular : .prohibited)
 app.run()
