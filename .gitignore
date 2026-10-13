@@ -13,3 +13,8 @@ layouts/tablet/
 # Showcase approvals list this machine's apps too; showcase.example.json is the sample.
 showcase.json
 lib/.window-id
+
+# Swift package build output and rendered checks.
+.build/
+.swiftpm/
+staging/

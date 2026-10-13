@@ -23,13 +23,17 @@ if ! security find-identity -v -p codesigning | grep -qF "$SIGN_ID"; then
   SIGN_ID="-"
 fi
 
-BUILD="$(mktemp -d)"
-trap 'rm -rf "$BUILD"' EXIT
-swiftc -O "$APP_DIR_REPO/HomeScreens.swift" -o "$BUILD/$EXE_NAME" -framework AppKit -framework WebKit
+# The shared look comes from project-lifecycle's MacAppStyle package (see Package.swift): from the
+# checkout named by PROJECT_LIFECYCLE_PACKAGE, else a sibling checkout, else fetched from GitHub.
+if [[ -z "${PROJECT_LIFECYCLE_PACKAGE:-}" && -f "${REPO:h}/project-lifecycle/Package.swift" ]]; then
+  export PROJECT_LIFECYCLE_PACKAGE="${REPO:h}/project-lifecycle"
+fi
+(cd "$REPO" && swift build -c release --product "$EXE_NAME" >&2)
+BUILD="$REPO/.build/release"
 
 rm -rf "$APP"
 mkdir -p "$CONTENTS/MacOS" "$CONTENTS/Resources"
-mv "$BUILD/$EXE_NAME" "$CONTENTS/MacOS/$EXE_NAME"
+cp "$BUILD/$EXE_NAME" "$CONTENTS/MacOS/$EXE_NAME"
 cp "$APP_DIR_REPO/assets/AppIcon.icns" "$CONTENTS/Resources/AppIcon.icns"
 
 # LaunchpadMapRepo tells the app which checkout's commands and pages to use;
