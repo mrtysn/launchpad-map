@@ -34,9 +34,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
 }
 
-/// HOME_SCREENS_SNAPSHOT=out.png renders the window offscreen from fixture data, once light and once dark
+/// HOME_SCREENS_SNAPSHOT=out.png, or the argument `--snapshot out.png` (which survives `open --args`), renders the window offscreen from fixture data, once light and once dark
 /// (out-light.png, out-dark.png), and exits. It reads no device and runs no launchpad-map command.
-let snapshotPath = ProcessInfo.processInfo.environment["HOME_SCREENS_SNAPSHOT"]
+let snapshotPath: String? = {
+    let args = CommandLine.arguments
+    if let i = args.firstIndex(of: "--snapshot"), i + 1 < args.count { return args[i + 1] }
+    return ProcessInfo.processInfo.environment["HOME_SCREENS_SNAPSHOT"]
+}()
 
 let app = NSApplication.shared
 let delegate = MainActor.assumeIsolated { AppDelegate() }

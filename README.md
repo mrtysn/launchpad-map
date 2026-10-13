@@ -64,8 +64,9 @@ in the middle, a footer line for messages. `Package.swift` pulls that package fr
 checkout named by `PROJECT_LIFECYCLE_PACKAGE` (`app/bundle.sh` uses a sibling
 `project-lifecycle` checkout when there is one), else from GitHub. The page's own
 colours are overridden at load by `app/PageTheme.swift`, so it follows light and dark.
-`HOME_SCREENS_SNAPSHOT=staging/home-screens.png .build/release/HomeScreens` renders the
-window offscreen from `app/fixtures/` (light and dark PNGs, no device asked, no window).
+`app/snapshot.sh` builds, then renders the window through `quiet-open` from `app/fixtures/` and stub
+footer text: ready, a running command, and a failed one (short and long), each light and dark, into
+`staging/` (no device asked, no focus taken). `HomeScreens --snapshot out.png` is the app's side of it.
 
 ## Showcase
 

@@ -36,20 +36,22 @@ func runSnapshot(to path: String) async -> Int32 {
     let status = #"{"attached":true,"ready":false,"model":"Redmi Pad 2","awake":false,"locked":false}"#
     controller.statuses["tablet"] = try? JSONDecoder().decode(Status.self, from: Data(status.utf8))
     controller.refreshControls()
-    controller.footer.show("Ready", announce: false)
 
     while controller.web.isLoading { try? await Task.sleep(nanoseconds: 100_000_000) }
     try? await Task.sleep(nanoseconds: 1_000_000_000)
 
     let stem = out.deletingPathExtension().path
-    for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-        w.appearance = NSAppearance(named: appearance)
-        w.contentView?.layoutSubtreeIfNeeded()
-        try? await Task.sleep(nanoseconds: 800_000_000)
-        guard let png = await capture(controller) else { print("snapshot: nothing drawn"); return 1 }
-        let file = URL(fileURLWithPath: "\(stem)-\(name).png")
-        do { try png.write(to: file) } catch { print("snapshot: \(error)"); return 1 }
-        print("snapshot: wrote \(file.path)")
+    for scenario in Scenario.allCases {
+        scenario.apply(to: controller)
+        for (name, appearance) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+            w.appearance = NSAppearance(named: appearance)
+            w.contentView?.layoutSubtreeIfNeeded()
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard let png = await capture(controller) else { print("snapshot: nothing drawn"); return 1 }
+            let file = URL(fileURLWithPath: "\(stem)\(scenario.suffix)-\(name).png")
+            do { try png.write(to: file) } catch { print("snapshot: \(error)"); return 1 }
+            print("snapshot: wrote \(file.path)")
+        }
     }
     return 0
 }
@@ -80,4 +82,45 @@ private func capture(_ controller: Controller) async -> Data? {
     shot?.draw(in: webRect)
     NSGraphicsContext.restoreGraphicsState()
     return out.representation(using: .png, properties: [:])
+}
+
+/// The footer and command states the window shows besides "Ready", set directly with stub text: no
+/// command runs and nothing is read from a device.
+@MainActor
+enum Scenario: CaseIterable {
+    case ready, running, failed, failedLong
+
+    var suffix: String {
+        switch self {
+        case .ready: return ""
+        case .running: return "-running"
+        case .failed: return "-error"
+        case .failedLong: return "-error-long"
+        }
+    }
+
+    func apply(to c: Controller) {
+        let stub = ["$ launchpad-map tablet write proposal.json", "page 1: moved 3 icons", "page 2: moved 5 icons"]
+        let stopped = [c.stopButton, c.pauseButton, c.resumeButton]
+        switch self {
+        case .ready:
+            c.footer.show("Ready", announce: false)
+        case .running:
+            c.logToggle.state = .on
+            c.toggleLog()
+            c.log.string = stub.joined(separator: "\n")
+            for b in stopped { b.isHidden = false }
+            c.spinner.startAnimation(nil)
+            c.footer.show("page 2: moved 5 icons, then 4 icons from the Games folder to page 3 and the dock, waiting for the screen to settle before the next operation", announce: false)
+        case .failed:
+            for b in stopped { b.isHidden = true }
+            c.spinner.stopAnimation(nil)
+            c.log.string = (stub + ["error: device offline", "✗ exit 1"]).joined(separator: "\n")
+            c.footer.show("Scanning the Redmi Pad 2: failed (exit 1); see the log", error: true)
+        case .failedLong:
+            c.window.setContentSize(NSSize(width: 900, height: 900))
+            c.footer.show("Applying the proposal on the Redmi Pad 2: failed (exit 1); see the log, the device went offline after page 2 and the remaining operations were not run: operations 7 to 12 of 12 never started", error: true)
+        }
+        c.refreshControls()
+    }
 }
