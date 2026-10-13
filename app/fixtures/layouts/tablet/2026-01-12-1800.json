@@ -1,0 +1,36 @@
+{
+  "title": "Tablet",
+  "date": "2026-01-12",
+  "time": "18:00",
+  "pages": [
+    [
+      "Clock",
+      "Maps",
+      "Notes",
+      "Camera",
+      "Photos",
+      "Mail",
+      "Music",
+      "Files",
+      {
+        "folder": "Tools",
+        "apps": [
+          "Calculator",
+          "Stopwatch",
+          "Recorder",
+          "Contacts"
+        ]
+      },
+      "Weather",
+      "Settings"
+    ],
+    [
+      "Books",
+      "Calendar",
+      "Browser",
+      "Messages",
+      "Chess",
+      "Podcasts"
+    ]
+  ]
+}

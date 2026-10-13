@@ -1,0 +1,43 @@
+{
+  "title": "Tidy up",
+  "date": "2026-01-13",
+  "time": "10:30",
+  "draft": true,
+  "note": "Media apps into one folder, Clock moved into Tools.",
+  "pages": [
+    [
+      "Maps",
+      "Notes",
+      "Camera",
+      "Photos",
+      "Mail",
+      "Files",
+      {
+        "folder": "Tools",
+        "apps": [
+          "Calculator",
+          "Stopwatch",
+          "Recorder",
+          "Contacts",
+          "Clock"
+        ]
+      },
+      {
+        "folder": "Media",
+        "apps": [
+          "Podcasts",
+          "Books",
+          "Music"
+        ]
+      },
+      "Weather",
+      "Settings"
+    ],
+    [
+      "Calendar",
+      "Browser",
+      "Messages",
+      "Chess"
+    ]
+  ]
+}

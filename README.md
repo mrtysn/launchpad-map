@@ -58,6 +58,15 @@ commands that feed it one click away.
 The app runs the commands of the checkout it was built from, so rebuild it with
 `app/bundle.sh` after changing the app; changes to the commands need no rebuild.
 
+The window follows the shared Mac app style (`MacAppStyle` in project-lifecycle): a
+header band with the device picker, the buttons and the device state, the history page
+in the middle, a footer line for messages. `Package.swift` pulls that package from the
+checkout named by `PROJECT_LIFECYCLE_PACKAGE` (`app/bundle.sh` uses a sibling
+`project-lifecycle` checkout when there is one), else from GitHub. The page's own
+colours are overridden at load by `app/PageTheme.swift`, so it follows light and dark.
+`HOME_SCREENS_SNAPSHOT=staging/home-screens.png .build/release/HomeScreens` renders the
+window offscreen from `app/fixtures/` (light and dark PNGs, no device asked, no window).
+
 ## Showcase
 
 `launchpad-map showcase` renders the newest snapshot with only the apps you have
