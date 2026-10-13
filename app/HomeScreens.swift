@@ -298,6 +298,8 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     let logToggle = NSButton(title: "Log", target: nil, action: nil)
     let log = NSTextView()
     let logScroll = NSScrollView()
+    /// The hairline between the page and the log, shown with it.
+    let logLine = NSView()
     let runner = Runner()
     var statuses: [String: Status] = [:]
     var poll: Timer?
@@ -359,17 +361,20 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
         logScroll.hasVerticalScroller = true
         logScroll.drawsBackground = false
         logScroll.isHidden = true
+        logLine.paint(Style.Palette.frame)
+        logLine.isHidden = true
+        logLine.heightAnchor.constraint(equalToConstant: Style.Metric.hairline).isActive = true
         logScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
 
         // The header band holds the device picker and the commands; the run controls sit left of them so
         // the picker and buttons stay where they are while a command runs.
         let controls: [NSView] = [spinner, pauseButton, resumeButton, stopButton, picker, scanButton, applyButton, moreButton, logToggle]
         band = HeaderBand(title: "Home Screens", state: "checking…", trailing: controls)
-        let stack = NSStackView(views: [web, logScroll])
+        let stack = NSStackView(views: [web, logLine, logScroll])
         stack.orientation = .vertical
         stack.spacing = 0
         stack.setHuggingPriority(.defaultLow, for: .vertical)
-        for v in [web, logScroll] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        for v in [web, logLine, logScroll] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
         layout = StyledLayout(window: window, band: band, content: stack, footer: footer)
         footer.show("Ready", announce: false)
         appearanceWatch = web.observe(\.effectiveAppearance, options: [.new]) { [weak self] web, _ in
@@ -672,7 +677,10 @@ final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScri
     @objc func pause() { runAside(device.cmd("op", "pause")); footer.show("Pausing after the current operation…") }
     @objc func resume() { runAside(device.cmd("op", "resume")); footer.show("Resuming…") }
 
-    @objc func toggleLog() { logScroll.isHidden = logToggle.state != .on }
+    @objc func toggleLog() {
+        logScroll.isHidden = logToggle.state != .on
+        logLine.isHidden = logScroll.isHidden
+    }
 
     func append(_ line: String) {
         let atEnd = log.visibleRect.maxY >= log.bounds.maxY - 4
