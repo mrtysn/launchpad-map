@@ -1,0 +1,14 @@
+{
+  "kind": "mac-app",
+  "name": "Home Screens",
+  "version": "1.0",
+  "test": [{"name": "self-test", "run": ["{binary}"], "env": {"HOME_SCREENS_SELFTEST": "1"}}],
+  "mac_app": {
+    "bundle_id": "local.launchpad-map.home-screens",
+    "swift_package": {"product": "HomeScreens"},
+    "executable": "HomeScreens",
+    "icon": "app/assets/AppIcon.icns",
+    "signing": "local-certificate",
+    "info_plist": {"LaunchpadMapRepo": "{repo}", "CFBundleDisplayName": "Home Screens"}
+  }
+}

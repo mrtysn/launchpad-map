@@ -34,7 +34,7 @@ inventory of one machine's apps.
 
 ## Home Screens app
 
-`app/bundle.sh` builds **Home Screens** into `~/Applications`: the history page
+`project-lifecycle install` builds **Home Screens** into `~/Applications`: the history page
 in a window, with the device picked in the toolbar (Mac, Phone, Tablet) and the
 commands that feed it one click away.
 
@@ -56,13 +56,15 @@ commands that feed it one click away.
 - Progress shows in the bar at the bottom; **Log** shows every line.
 
 The app runs the commands of the checkout it was built from, so rebuild it with
-`app/bundle.sh` after changing the app; changes to the commands need no rebuild.
+`project-lifecycle install` after changing the app; changes to the commands need no rebuild.
+`project-lifecycle test` first runs the app's self-test over a stub checkout (`app/SelfTest.swift`):
+every control pressed, no real command run.
 
 The window follows the shared Mac app style (`MacAppStyle` in project-lifecycle): a
 header band with the device picker, the buttons and the device state, the history page
 in the middle, a footer line for messages. `Package.swift` pulls that package from the
-checkout named by `PROJECT_LIFECYCLE_PACKAGE` (`app/bundle.sh` uses a sibling
-`project-lifecycle` checkout when there is one), else from GitHub. The page's own
+checkout named by `PROJECT_LIFECYCLE_PACKAGE` (`project-lifecycle` sets it for its own
+builds), else from GitHub. The page's own
 colours are overridden at load by `app/PageTheme.swift`, so it follows light and dark.
 `app/snapshot.sh` builds, then renders the window through `quiet-open` from `app/fixtures/` and stub
 footer text: ready, a running command, and a failed one (short and long), each light and dark, into
