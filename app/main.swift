@@ -24,10 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.mainMenu = main
 
         controller = Controller()
-        // The first launch centres the window; later ones reopen it where it was left.
-        if UserDefaults.standard.string(forKey: "NSWindow Frame HomeScreensWindow") == nil {
-            controller?.window.center()
-        }
         controller?.window.makeKeyAndOrderFront(nil)
     }
 

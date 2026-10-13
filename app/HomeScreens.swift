@@ -9,16 +9,23 @@
 // bundled from; the app reimplements none of them.
 
 import AppKit
+import MacAppStyle
 import WebKit
 
 // MARK: - Where things are
 
-/// The launchpad-map checkout, recorded in Info.plist by bundle.sh.
+/// The launchpad-map checkout: recorded in Info.plist by bundle.sh; a build run straight from the
+/// checkout (swift build) is found by walking up from the executable to the folder with bin/launchpad-map.
 let repo: URL = {
-    guard let path = Bundle.main.object(forInfoDictionaryKey: "LaunchpadMapRepo") as? String, !path.isEmpty else {
-        fatalError("Info.plist has no LaunchpadMapRepo; build the app with app/bundle.sh")
+    if let path = Bundle.main.object(forInfoDictionaryKey: "LaunchpadMapRepo") as? String, !path.isEmpty {
+        return URL(fileURLWithPath: path)
     }
-    return URL(fileURLWithPath: path)
+    var dir = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath().deletingLastPathComponent()
+    while dir.path != "/" {
+        if FileManager.default.fileExists(atPath: dir.appendingPathComponent("bin/launchpad-map").path) { return dir }
+        dir = dir.deletingLastPathComponent()
+    }
+    fatalError("Info.plist has no LaunchpadMapRepo; build the app with app/bundle.sh")
 }()
 let tool = repo.appendingPathComponent("bin/launchpad-map")
 let historyPage = repo.appendingPathComponent("history.html")
@@ -52,12 +59,16 @@ func environment() -> [String: String] {
 
 // MARK: - Devices
 
+/// Where each device's snapshots and proposals are read from: the checkout's layouts/. A snapshot run
+/// points it at the fixtures.
+nonisolated(unsafe) var dataRoot: URL = repo.appendingPathComponent("layouts")
+
 struct Device {
     let id: String       // the page's #id and the command's device word
     let label: String
     let android: Bool
     var name: String { label.lowercased() }
-    var dir: URL { android ? repo.appendingPathComponent("layouts/\(id)") : repo.appendingPathComponent("layouts") }
+    var dir: URL { android ? dataRoot.appendingPathComponent(id) : dataRoot }
     /// `launchpad-map` arguments for this device: the Android ones take its word first.
     func cmd(_ args: String...) -> [String] { android ? [id] + args : args }
     func cmd(_ args: [String]) -> [String] { android ? [id] + args : args }
@@ -269,18 +280,20 @@ func fetchStatus(_ device: Device, _ done: @escaping (Status?) -> Void) {
 
 // MARK: - Window
 
-final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
+@MainActor
+final class Controller: NSObject, NSWindowDelegate, WKNavigationDelegate, WKScriptMessageHandler {
     let window: NSWindow
     let web: WKWebView
+    var band: HeaderBand!
+    let footer = FooterStatus()
+    var layout: StyledLayout?
     let picker = NSSegmentedControl(labels: devices.map(\.label), trackingMode: .selectOne, target: nil, action: nil)
-    let statusLabel = NSTextField(labelWithString: "")
     let scanButton = NSButton(title: "Scan", target: nil, action: nil)
     let applyButton = NSButton(title: "Apply Proposal…", target: nil, action: nil)
     let moreButton = NSButton(title: "More", target: nil, action: nil)
     let stopButton = NSButton(title: "Stop", target: nil, action: nil)
     let pauseButton = NSButton(title: "Pause", target: nil, action: nil)
     let resumeButton = NSButton(title: "Resume", target: nil, action: nil)
-    let progressLine = NSTextField(labelWithString: "")
     let spinner = NSProgressIndicator()
     let logToggle = NSButton(title: "Log", target: nil, action: nil)
     let log = NSTextView()
@@ -290,80 +303,84 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
     var poll: Timer?
     var rebuild: Timer?
     var showingShowcase = false
+    var appearanceWatch: NSKeyValueObservation?
+    /// A snapshot run reads nothing from the devices and loads the page it is given.
+    let offline: Bool
 
     var device: Device { devices[max(0, picker.selectedSegment)] }
     var ready: Bool { !device.android || statuses[device.id]?.ready == true }
 
-    override init() {
+    init(offline: Bool = false, page: URL? = nil) {
+        self.offline = offline
         let config = WKWebViewConfiguration()
-        // The window's own picker chooses the device; hide the page's.
+        // The window's own picker chooses the device; hide the page's. The page takes its colours from the style.
         let js = "var s = document.createElement('style'); s.textContent = '.devices { display: none !important; }';"
             + " document.documentElement.appendChild(s);"
         config.userContentController.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentStart, forMainFrameOnly: true))
+        config.userContentController.addUserScript(
+            WKUserScript(source: PageTheme.script(for: NSApp.effectiveAppearance), injectionTime: .atDocumentStart, forMainFrameOnly: true))
         web = WKWebView(frame: .zero, configuration: config)
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 900),
-                          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-                          backing: .buffered, defer: false)
+        window = StyledWindow.make(title: "Home Screens", size: NSSize(width: 1400, height: 900),
+                                   minSize: NSSize(width: 900, height: 560), autosave: "HomeScreensWindow")
         super.init()
         config.userContentController.add(self, name: "homeScreens")
-        window.title = "Home Screens"
-        window.setFrameAutosaveName("HomeScreensWindow")
         window.delegate = self
         web.navigationDelegate = self
-
-        let toolbar = NSToolbar(identifier: "main")
-        toolbar.delegate = self
-        toolbar.displayMode = .iconOnly
-        window.toolbar = toolbar
-        window.toolbarStyle = .unified
+        web.setValue(false, forKey: "drawsBackground")
+        web.setAccessibilityLabel("Home screen history")
 
         picker.target = self
         picker.action = #selector(pick)
         picker.selectedSegment = devices.firstIndex { $0.id == UserDefaults.standard.string(forKey: "device") } ?? 0
+        picker.setAccessibilityLabel("Device")
         for (b, a) in [(scanButton, #selector(scan)), (applyButton, #selector(apply)), (moreButton, #selector(more)),
                        (stopButton, #selector(stop)), (pauseButton, #selector(pause)), (resumeButton, #selector(resume)),
                        (logToggle, #selector(toggleLog))] {
             b.target = self; b.action = a
         }
         logToggle.setButtonType(.pushOnPushOff)
-        statusLabel.textColor = .secondaryLabelColor
-        statusLabel.font = .systemFont(ofSize: 12)
+        moreButton.setAccessibilityLabel("More")
+        logToggle.setAccessibilityLabel("Command log")
 
         spinner.style = .spinning
         spinner.controlSize = .small
         spinner.isDisplayedWhenStopped = false
-        progressLine.lineBreakMode = .byTruncatingTail
-        progressLine.textColor = .secondaryLabelColor
-        progressLine.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        progressLine.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for b in [stopButton, pauseButton, resumeButton, logToggle] { b.controlSize = .small }
+        spinner.setAccessibilityLabel("Working")
         for b in [stopButton, pauseButton, resumeButton] { b.isHidden = true }
 
         log.isEditable = false
-        log.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
-        log.textContainerInset = NSSize(width: 6, height: 6)
+        log.font = Style.Typography.mono(11)
+        log.textColor = Style.Palette.text
+        log.drawsBackground = false
+        log.textContainerInset = NSSize(width: Style.Metric.gutter, height: 6)
         log.autoresizingMask = [.width]
+        log.setAccessibilityLabel("Command log")
         logScroll.documentView = log
         logScroll.hasVerticalScroller = true
+        logScroll.drawsBackground = false
         logScroll.isHidden = true
         logScroll.heightAnchor.constraint(equalToConstant: 180).isActive = true
 
-        let bar = NSStackView(views: [spinner, progressLine, pauseButton, resumeButton, stopButton, logToggle])
-        bar.orientation = .horizontal
-        bar.spacing = 8
-        bar.edgeInsets = NSEdgeInsets(top: 5, left: 12, bottom: 5, right: 12)
-        let stack = NSStackView(views: [web, logScroll, bar])
+        // The header band holds the device picker and the commands; the run controls sit left of them so
+        // the picker and buttons stay where they are while a command runs.
+        let controls: [NSView] = [spinner, pauseButton, resumeButton, stopButton, picker, scanButton, applyButton, moreButton, logToggle]
+        band = HeaderBand(title: "Home Screens", state: "checking…", trailing: controls)
+        let stack = NSStackView(views: [web, logScroll])
         stack.orientation = .vertical
         stack.spacing = 0
         stack.setHuggingPriority(.defaultLow, for: .vertical)
-        for v in [web, logScroll, bar] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
-        window.contentView = stack
-        progressLine.stringValue = "Ready"
+        for v in [web, logScroll] { v.widthAnchor.constraint(equalTo: stack.widthAnchor).isActive = true }
+        layout = StyledLayout(window: window, band: band, content: stack, footer: footer)
+        footer.show("Ready", announce: false)
+        appearanceWatch = web.observe(\.effectiveAppearance, options: [.new]) { [weak self] web, _ in
+            let appearance = web.effectiveAppearance
+            MainActor.assumeIsolated { _ = self?.web.evaluateJavaScript(PageTheme.update(for: appearance)) }
+        }
 
         runner.onStart = { [weak self] job in
             guard let self else { return }
             self.append("$ launchpad-map " + job.args.joined(separator: " "))
-            self.progressLine.stringValue = job.what + "…"
+            self.footer.show(job.what + "…")
             self.spinner.startAnimation(nil)
             self.stopButton.isHidden = false
             let write = self.device.android && job.args.count > 1 && job.args[1] == "write" && !job.args.contains("--dry-run")
@@ -373,13 +390,13 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
         }
         runner.onLine = { [weak self] _, line in
             self?.append(line)
-            self?.progressLine.stringValue = line
+            self?.footer.show(line, announce: false)
         }
         runner.onDone = { [weak self] job, code in
             guard let self else { return }
             let ok = code == 0
             self.append(ok ? "✓ done" : "✗ exit \(code)")
-            self.progressLine.stringValue = ok ? job.what + ": done" : job.what + ": failed (exit \(code)); see the log"
+            self.footer.show(ok ? job.what + ": done" : job.what + ": failed (exit \(code)); see the log", error: !ok)
             if !ok { self.logToggle.state = .on; self.toggleLog() }
             if !self.runner.busy {
                 self.spinner.stopAnimation(nil)
@@ -388,14 +405,21 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
             self.refreshControls()
         }
 
-        if FileManager.default.fileExists(atPath: historyPage.path) {
+        if let page {
+            showingShowcase = false
+            web.loadFileURL(page, allowingReadAccessTo: page.deletingLastPathComponent())
+        } else if FileManager.default.fileExists(atPath: historyPage.path) {
             load()
         } else {
             render()
         }
         refreshControls()
-        pollStatus()
-        poll = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in self?.pollStatus() }
+        if !offline {
+            pollStatus()
+            poll = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
+                MainActor.assumeIsolated { self?.pollStatus() }
+            }
+        }
     }
 
     func load() {
@@ -461,13 +485,14 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
         let alert = NSAlert()
         alert.messageText = "Apply “\(p.title)” to the \(d.name)?"
         var text = d.android
-            ? "This drives the \(d.name)'s screen: it drags icons and folders until the home screen matches the proposal. Leave the device alone until it finishes; Pause and Stop sit in the bar below."
+            ? "This drives the \(d.name)'s screen: it drags icons and folders until the home screen matches the proposal. Leave the device alone until it finishes; Pause and Stop sit in the band above."
             : "This rewrites the Launchpad database and restarts the Dock. The database is backed up first, and the write is checked and rolled back if the Dock does not keep it."
         if !p.note.isEmpty { text += "\n\n" + p.note }
         alert.informativeText = text + "\n\nThe plan, from a dry run:"
         let view = NSTextView(frame: NSRect(x: 0, y: 0, width: 620, height: 280))
         view.isEditable = false
-        view.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        view.font = Style.Typography.mono(11)
+        view.setAccessibilityLabel("Dry-run plan")
         view.string = plan.joined(separator: "\n")
         let scroll = NSScrollView(frame: view.frame)
         scroll.documentView = view
@@ -624,9 +649,11 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
     func scheduleRebuild() {
         rebuild?.invalidate()
         rebuild = Timer.scheduledTimer(withTimeInterval: 4, repeats: false) { [weak self] _ in
-            guard let self else { return }
-            if !self.runner.queued(["history"]) { self.runner.enqueue(Job(["history"], "Saving the history page")) }
-            if !self.runner.queued(["showcase"]) { self.runner.enqueue(Job(["showcase"], "Saving the showcase")) }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                if !self.runner.queued(["history"]) { self.runner.enqueue(Job(["history"], "Saving the history page")) }
+                if !self.runner.queued(["showcase"]) { self.runner.enqueue(Job(["showcase"], "Saving the showcase")) }
+            }
         }
     }
 
@@ -636,21 +663,21 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
         // A write on the phone or tablet stops between operations, cleanly.
         if let job = runner.current, device.android, job.args.count > 1, job.args[1] == "write", !job.args.contains("--dry-run") {
             runAside(device.cmd("op", "stop"))
-            progressLine.stringValue = "Stopping after the current operation…"
+            footer.show("Stopping after the current operation…")
         } else {
             runner.stop()
         }
     }
 
-    @objc func pause() { runAside(device.cmd("op", "pause")); progressLine.stringValue = "Pausing after the current operation…" }
-    @objc func resume() { runAside(device.cmd("op", "resume")); progressLine.stringValue = "Resuming…" }
+    @objc func pause() { runAside(device.cmd("op", "pause")); footer.show("Pausing after the current operation…") }
+    @objc func resume() { runAside(device.cmd("op", "resume")); footer.show("Resuming…") }
 
     @objc func toggleLog() { logScroll.isHidden = logToggle.state != .on }
 
     func append(_ line: String) {
         let atEnd = log.visibleRect.maxY >= log.bounds.maxY - 4
         log.textStorage?.append(NSAttributedString(string: line + "\n", attributes: [
-            .font: NSFont.monospacedSystemFont(ofSize: 11, weight: .regular), .foregroundColor: NSColor.labelColor]))
+            .font: Style.Typography.mono(11), .foregroundColor: Style.Palette.text]))
         if atEnd { log.scrollToEndOfDocument(nil) }
     }
 
@@ -677,6 +704,7 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
     }
 
     func pollStatus() {
+        guard !offline else { return }
         for d in devices where d.android {
             fetchStatus(d) { [weak self] s in
                 guard let self else { return }
@@ -690,11 +718,11 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
         let d = device, busy = runner.busy
         if d.android {
             let s = statuses[d.id]
-            statusLabel.stringValue = s?.summary ?? "checking…"
+            band.update(state: s?.summary ?? "checking…", figures: [])
             scanButton.toolTip = s?.ready == true ? "Scan the \(d.name)'s home screen"
                 : "A scan needs the \(d.name) attached, its screen on and unlocked"
         } else {
-            statusLabel.stringValue = showingShowcase ? "Showcase preview" : "Launchpad"
+            band.update(state: showingShowcase ? "Showcase preview" : "Launchpad", figures: [])
             scanButton.toolTip = "Read the Launchpad database and add a snapshot"
         }
         scanButton.isEnabled = !busy && ready
@@ -705,41 +733,16 @@ final class Controller: NSObject, NSToolbarDelegate, NSWindowDelegate, WKNavigat
         picker.isEnabled = !busy
     }
 
-    // MARK: toolbar
-
-    static let pickerID = NSToolbarItem.Identifier("device")
-    static let statusID = NSToolbarItem.Identifier("status")
-    static let scanID = NSToolbarItem.Identifier("scan")
-    static let applyID = NSToolbarItem.Identifier("apply")
-    static let moreID = NSToolbarItem.Identifier("more")
-
-    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [Self.pickerID, .flexibleSpace, Self.statusID, Self.scanID, Self.applyID, Self.moreID]
-    }
-
-    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        toolbarDefaultItemIdentifiers(toolbar)
-    }
-
-    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier id: NSToolbarItem.Identifier,
-                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        let item = NSToolbarItem(itemIdentifier: id)
-        switch id {
-        case Self.pickerID: item.view = picker; item.label = "Device"
-        case Self.statusID: item.view = statusLabel; item.label = "Status"
-        case Self.scanID: item.view = scanButton; item.label = "Scan"
-        case Self.applyID: item.view = applyButton; item.label = "Apply"
-        case Self.moreID: item.view = moreButton; item.label = "More"
-        default: return nil
-        }
-        return item
-    }
-
     // MARK: window
 
     func windowWillClose(_ notification: Notification) {
         runner.stop()
         NSApp.terminate(nil)
+    }
+
+    /// The page keeps the style's colours for the window's current appearance from its first paint.
+    func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        webView.evaluateJavaScript(PageTheme.update(for: webView.effectiveAppearance))
     }
 
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
