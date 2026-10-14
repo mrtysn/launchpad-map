@@ -34,7 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         controller = Controller()
         controller?.window.makeKeyAndOrderFront(nil)
-        AppLifecycle.install(reopen: { [weak self] in
+        AppLifecycle.install(hideFromDock: false, reopen: { [weak self] in
             if let window = self?.controller?.window { AppWindow.show(window) }
         })
     }
