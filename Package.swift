@@ -27,7 +27,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "HomeScreens",
-            dependencies: [.product(name: "MacAppStyle", package: "project-lifecycle")],
+            dependencies: [
+                .product(name: "MacAppBase", package: "project-lifecycle"),
+                .product(name: "MacAppStyle", package: "project-lifecycle"),
+            ],
             path: "app",
             exclude: ["assets", "fixtures", "snapshot.sh"]
         ),

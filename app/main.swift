@@ -1,4 +1,5 @@
 import AppKit
+import MacAppBase
 
 // MARK: - App
 
@@ -33,9 +34,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         controller = Controller()
         controller?.window.makeKeyAndOrderFront(nil)
+        AppLifecycle.install(reopen: { [weak self] in
+            if let window = self?.controller?.window { AppWindow.show(window) }
+        })
     }
 
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 /// HOME_SCREENS_SNAPSHOT=out.png, or the argument `--snapshot out.png` (which survives `open --args`), renders the window offscreen from fixture data, once light and once dark
